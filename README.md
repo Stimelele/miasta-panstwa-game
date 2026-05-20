@@ -28,10 +28,12 @@ W `.env.local` wklej config z Firebase Web App:
 ```bash
 NEXT_PUBLIC_FIREBASE_API_KEY=
 NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=
+NEXT_PUBLIC_FIREBASE_DATABASE_URL=
 NEXT_PUBLIC_FIREBASE_PROJECT_ID=
 NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=
 NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=
 NEXT_PUBLIC_FIREBASE_APP_ID=
+NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID=
 NEXT_PUBLIC_FIREBASE_COLLECTION_ROOT=Panstwa Miasta Gra
 ```
 
@@ -49,11 +51,13 @@ W Firebase wlacz Anonymous Auth i opublikuj `firestore.rules`.
 Dodaj server-only env:
 
 ```bash
+AI_PROVIDER=groq
 AI_API_KEY=
-AI_MODEL=gpt-5-mini
+AI_MODEL=openai/gpt-oss-20b
 ```
 
-Mozesz tez uzyc `OPENAI_API_KEY` zamiast `AI_API_KEY`. Bez tokenu system nadal
+Mozesz tez uzyc `OPENAI_API_KEY` zamiast `AI_API_KEY` dla OpenAI. Klucze Groq
+z prefiksem `gsk_` sa wykrywane automatycznie. Bez tokenu system nadal
 sprawdza podstawowa zasade: odpowiedz musi zaczynac sie od wylosowanej litery.
 
 ## Avatar upload do GitHuba

@@ -29,6 +29,143 @@ function extractOutputText(payload: unknown) {
   );
 }
 
+function validationSchema() {
+  return {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      answer: { type: "string" },
+      valid: { type: "boolean" },
+      points: { type: "integer", minimum: 0, maximum: 10 },
+      confidence: { type: "number", minimum: 0, maximum: 1 },
+      reason: { type: "string" },
+      source: { type: "string", enum: ["ai"] },
+    },
+    required: ["answer", "valid", "points", "confidence", "reason", "source"],
+  };
+}
+
+function parseAiResult(answer: string, outputText: string) {
+  const parsed = JSON.parse(outputText);
+
+  return {
+    answer,
+    valid: Boolean(parsed.valid),
+    points: parsed.valid ? Number(parsed.points || 10) : 0,
+    confidence: Number(parsed.confidence || 0.75),
+    reason: String(parsed.reason || "Sprawdzone przez AI."),
+    source: "ai",
+  };
+}
+
+async function validateWithGroq(
+  token: string,
+  category: string,
+  letter: string,
+  answer: string,
+) {
+  const response = await fetch(
+    "https://api.groq.com/openai/v1/chat/completions",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: process.env.AI_MODEL || "openai/gpt-oss-20b",
+        messages: [
+          {
+            role: "system",
+            content:
+              "Jestes sedzia w polskiej grze Panstwa Miasta. Odpowiadasz tylko poprawnym JSON zgodnym ze schematem.",
+          },
+          {
+            role: "user",
+            content: [
+              `Kategoria: ${category}`,
+              `Wylosowana litera: ${letter}`,
+              `Odpowiedz gracza: ${answer}`,
+              "Zasady: odpowiedz ma byc prawdziwa, pasowac do kategorii i zaczynac sie od litery. Polskie znaki traktuj normalnie, np. Lodz pasuje do L.",
+            ].join("\n"),
+          },
+        ],
+        response_format: {
+          type: "json_schema",
+          json_schema: {
+            name: "answer_validation",
+            strict: true,
+            schema: validationSchema(),
+          },
+        },
+        max_completion_tokens: 220,
+      }),
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error("Groq validation failed.");
+  }
+
+  const payload = (await response.json()) as {
+    choices?: Array<{ message?: { content?: string } }>;
+  };
+  const outputText = payload.choices?.[0]?.message?.content || "";
+  return parseAiResult(answer, outputText);
+}
+
+async function validateWithOpenAi(
+  token: string,
+  category: string,
+  letter: string,
+  answer: string,
+) {
+  const response = await fetch("https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: process.env.AI_MODEL || "gpt-5-mini",
+      instructions:
+        "Jestes sedzia w polskiej grze Panstwa Miasta. Oceniaj krotko i bez dodatkowego tekstu poza struktura JSON.",
+      input: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "input_text",
+              text: [
+                `Kategoria: ${category}`,
+                `Wylosowana litera: ${letter}`,
+                `Odpowiedz gracza: ${answer}`,
+                "Zasady: odpowiedz ma byc prawdziwa, pasowac do kategorii i zaczynac sie od litery. Polskie znaki traktuj normalnie, np. Lodz pasuje do L.",
+              ].join("\n"),
+            },
+          ],
+        },
+      ],
+      max_output_tokens: 220,
+      text: {
+        format: {
+          type: "json_schema",
+          name: "answer_validation",
+          strict: true,
+          schema: validationSchema(),
+        },
+      },
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error("OpenAI validation failed.");
+  }
+
+  const payload = await response.json();
+  return parseAiResult(answer, extractOutputText(payload));
+}
+
 export async function POST(request: Request) {
   const body = (await request.json()) as ValidationRequest;
   const category = body.category?.trim() || "Nieznana kategoria";
@@ -42,79 +179,14 @@ export async function POST(request: Request) {
   }
 
   try {
-    const response = await fetch("https://api.openai.com/v1/responses", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: process.env.AI_MODEL || "gpt-5-mini",
-        instructions:
-          "Jestes sedzia w polskiej grze Panstwa Miasta. Oceniaj krotko i bez dodatkowego tekstu poza struktura JSON.",
-        input: [
-          {
-            role: "user",
-            content: [
-              {
-                type: "input_text",
-                text: [
-                  `Kategoria: ${category}`,
-                  `Wylosowana litera: ${letter}`,
-                  `Odpowiedz gracza: ${answer}`,
-                  "Zasady: odpowiedz ma byc prawdziwa, pasowac do kategorii i zaczynac sie od litery. Polskie znaki traktuj normalnie, np. Lodz pasuje do L.",
-                ].join("\n"),
-              },
-            ],
-          },
-        ],
-        max_output_tokens: 220,
-        text: {
-          format: {
-            type: "json_schema",
-            name: "answer_validation",
-            strict: true,
-            schema: {
-              type: "object",
-              additionalProperties: false,
-              properties: {
-                answer: { type: "string" },
-                valid: { type: "boolean" },
-                points: { type: "integer", minimum: 0, maximum: 10 },
-                confidence: { type: "number", minimum: 0, maximum: 1 },
-                reason: { type: "string" },
-                source: { type: "string", enum: ["ai"] },
-              },
-              required: [
-                "answer",
-                "valid",
-                "points",
-                "confidence",
-                "reason",
-                "source",
-              ],
-            },
-          },
-        },
-      }),
-    });
+    const provider =
+      process.env.AI_PROVIDER || (token.startsWith("gsk_") ? "groq" : "openai");
+    const result =
+      provider === "groq"
+        ? await validateWithGroq(token, category, letter, answer)
+        : await validateWithOpenAi(token, category, letter, answer);
 
-    if (!response.ok) {
-      return NextResponse.json(fallback);
-    }
-
-    const payload = await response.json();
-    const outputText = extractOutputText(payload);
-    const parsed = JSON.parse(outputText);
-
-    return NextResponse.json({
-      answer,
-      valid: Boolean(parsed.valid),
-      points: parsed.valid ? Number(parsed.points || 10) : 0,
-      confidence: Number(parsed.confidence || 0.75),
-      reason: String(parsed.reason || "Sprawdzone przez AI."),
-      source: "ai",
-    });
+    return NextResponse.json(result);
   } catch {
     return NextResponse.json(fallback);
   }
