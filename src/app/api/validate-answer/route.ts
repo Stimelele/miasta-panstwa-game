@@ -78,7 +78,7 @@ async function validateWithGroq(
           {
             role: "system",
             content:
-              "Jestes sedzia w polskiej grze Panstwa Miasta. Odpowiadasz tylko poprawnym JSON zgodnym ze schematem.",
+              "Jestes sedzia w polskiej grze Panstwa Miasta. Odpowiadasz tylko poprawnym JSON zgodnym ze schematem. Pole reason zawsze pisz po polsku.",
           },
           {
             role: "user",
@@ -129,7 +129,7 @@ async function validateWithOpenAi(
     body: JSON.stringify({
       model: process.env.AI_MODEL || "gpt-5-mini",
       instructions:
-        "Jestes sedzia w polskiej grze Panstwa Miasta. Oceniaj krotko i bez dodatkowego tekstu poza struktura JSON.",
+        "Jestes sedzia w polskiej grze Panstwa Miasta. Oceniaj krotko i bez dodatkowego tekstu poza struktura JSON. Pole reason zawsze pisz po polsku.",
       input: [
         {
           role: "user",
