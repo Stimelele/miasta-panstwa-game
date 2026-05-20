@@ -46,6 +46,8 @@ export type GameCategory = {
 };
 
 export type PlayerProfile = {
+  uid?: string;
+  email?: string | null;
   intbaId: string;
   name: string;
   avatarUrl?: string;
@@ -93,6 +95,7 @@ export type AnswerCheck = {
 };
 
 export type RoundAnswerDoc = {
+  accountId?: string;
   playerId: string;
   playerName: string;
   avatarUrl?: string;

@@ -30,6 +30,13 @@ import {
   X,
 } from "lucide-react";
 import {
+  createUserWithEmailAndPassword,
+  onAuthStateChanged,
+  signInWithEmailAndPassword,
+  signOut,
+  updateProfile,
+} from "firebase/auth";
+import {
   collection,
   deleteDoc,
   doc,
@@ -65,7 +72,6 @@ import {
   type RoundAnswerDoc,
 } from "@/lib/game";
 import {
-  ensureAnonymousUser,
   getFirebaseClient,
   isFirebaseConfigured,
 } from "@/lib/firebase";
@@ -82,12 +88,22 @@ const initialSettings: RoomSettings = {
   categories: DEFAULT_CATEGORIES,
 };
 
-function userRef(db: Firestore, playerId: string) {
-  return doc(db, GAME_COLLECTION, "uzytkownicy", "lista", playerId);
+function userRef(db: Firestore, accountId: string) {
+  return doc(db, GAME_COLLECTION, "uzytkownicy", "lista", accountId);
 }
 
-function userGameRef(db: Firestore, playerId: string) {
-  return doc(userRef(db, playerId), "gra", GAME_DOC_ID);
+function userGameRef(db: Firestore, accountId: string) {
+  return doc(userRef(db, accountId), "gra", GAME_DOC_ID);
+}
+
+function intbaProfileRef(db: Firestore, intbaId: string) {
+  return doc(
+    db,
+    GAME_COLLECTION,
+    "intbaIds",
+    "mapa",
+    createPlayerId(intbaId),
+  );
 }
 
 function roomRef(db: Firestore, code: string) {
@@ -158,12 +174,39 @@ function statusText(status: GameRoom["status"]) {
   return "Lobby";
 }
 
+function authMessage(error: unknown) {
+  const code =
+    typeof error === "object" && error && "code" in error
+      ? String((error as { code?: string }).code)
+      : "";
+
+  if (code.includes("auth/email-already-in-use")) {
+    return "Ten email jest juz zarejestrowany.";
+  }
+  if (code.includes("auth/invalid-credential")) {
+    return "Niepoprawny email albo haslo.";
+  }
+  if (code.includes("auth/weak-password")) {
+    return "Haslo musi miec minimum 6 znakow.";
+  }
+  if (code.includes("auth/invalid-email")) {
+    return "Podaj poprawny adres email.";
+  }
+  if (code.includes("auth/operation-not-allowed")) {
+    return "Wlacz Email/Password w Firebase Authentication.";
+  }
+
+  return error instanceof Error ? error.message : "Nie udalo sie zalogowac.";
+}
+
 export function GameShell() {
   const firebaseReady = isFirebaseConfigured();
   const [profile, setProfile] = useState<PlayerProfile>({
     intbaId: "",
     name: "",
   });
+  const [authEmail, setAuthEmail] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
   const [authMode, setAuthMode] = useState<"login" | "register">("login");
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [authBusy, setAuthBusy] = useState(false);
@@ -183,10 +226,12 @@ export function GameShell() {
   const [avatarBusy, setAvatarBusy] = useState(false);
   const [settingsDirty, setSettingsDirty] = useState(false);
   const revealRequestedRef = useRef(false);
+  const profileRef = useRef(profile);
 
+  const accountId = profile.uid || "";
   const playerId = useMemo(
-    () => createPlayerId(profile.intbaId),
-    [profile.intbaId],
+    () => createPlayerId(profile.intbaId || profile.uid || profile.email || ""),
+    [profile.email, profile.intbaId, profile.uid],
   );
   const currentPlayer = players.find((player) => player.id === playerId);
   const isHost = Boolean(room && room.hostId === playerId);
@@ -227,6 +272,10 @@ export function GameShell() {
   );
 
   useEffect(() => {
+    profileRef.current = profile;
+  }, [profile]);
+
+  useEffect(() => {
     const saved = window.localStorage.getItem(PROFILE_STORAGE_KEY);
     if (!saved) {
       return;
@@ -234,15 +283,57 @@ export function GameShell() {
 
     try {
       const savedProfile = JSON.parse(saved) as PlayerProfile;
-      if (savedProfile.intbaId && savedProfile.name) {
+      if (savedProfile.email) {
+        setAuthEmail(savedProfile.email);
+      }
+      if (savedProfile.intbaId || savedProfile.name) {
         setProfile(savedProfile);
-        setIsAuthenticated(true);
-        setStatus("Sesja INTBA ID przywrocona.");
+        setStatus("Dane profilu INTBA wczytane.");
       }
     } catch {
       window.localStorage.removeItem(PROFILE_STORAGE_KEY);
     }
   }, []);
+
+  useEffect(() => {
+    if (!firebaseReady) {
+      return;
+    }
+
+    const { auth, db } = getFirebaseClient();
+    return onAuthStateChanged(auth, async (user) => {
+      if (!user) {
+        setIsAuthenticated(false);
+        return;
+      }
+
+      const snapshot = await getDoc(userRef(db, user.uid));
+      const savedUser = snapshot.exists()
+        ? (snapshot.data() as PlayerProfile)
+        : null;
+      const currentProfile = profileRef.current;
+      const nextProfile: PlayerProfile = {
+        uid: user.uid,
+        email: user.email,
+        intbaId: savedUser?.intbaId || currentProfile.intbaId,
+        name: savedUser?.name || user.displayName || currentProfile.name,
+        avatarUrl: savedUser?.avatarUrl || currentProfile.avatarUrl || "",
+      };
+
+      window.localStorage.setItem(
+        PROFILE_STORAGE_KEY,
+        JSON.stringify(nextProfile),
+      );
+      setProfile(nextProfile);
+      setAuthEmail(user.email || "");
+      setIsAuthenticated(Boolean(nextProfile.intbaId && nextProfile.name));
+      setStatus(
+        nextProfile.intbaId && nextProfile.name
+          ? "Zalogowano przez email i haslo."
+          : "Konto Firebase zalogowane. Uzupelnij INTBA ID.",
+      );
+    });
+  }, [firebaseReady]);
 
   useEffect(() => {
     if (!room || settingsDirty) {
@@ -367,7 +458,8 @@ export function GameShell() {
   function persistProfile(nextProfile: PlayerProfile) {
     window.localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify(nextProfile));
     setProfile(nextProfile);
-    setIsAuthenticated(true);
+    setAuthEmail(nextProfile.email || "");
+    setIsAuthenticated(Boolean(nextProfile.uid && nextProfile.intbaId));
   }
 
   async function registerAccount() {
@@ -375,39 +467,71 @@ export function GameShell() {
       ...profile,
       intbaId: profile.intbaId.trim(),
       name: profile.name.trim(),
+      email: authEmail.trim().toLowerCase(),
     };
+    const password = authPassword.trim();
+
+    if (!trimmedProfile.email || !password) {
+      setStatus("Do rejestracji podaj email i haslo.");
+      return;
+    }
 
     if (!trimmedProfile.intbaId || !trimmedProfile.name) {
-      setStatus("Do rejestracji podaj INTBA ID i nick.");
+      setStatus("Do rejestracji podaj tez INTBA ID i nick.");
       return;
     }
 
     if (!firebaseReady) {
-      setStatus("Firebase musi byc podpiety, zeby rejestrowac INTBA ID.");
+      setStatus("Firebase musi byc podpiety, zeby rejestrowac konto.");
       return;
     }
 
     setAuthBusy(true);
     try {
-      const { db } = getFirebaseClient();
-      await ensureAnonymousUser();
-      const id = createPlayerId(trimmedProfile.intbaId);
-      const existing = await getDoc(userRef(db, id));
+      const { auth, db } = getFirebaseClient();
+      const intbaId = createPlayerId(trimmedProfile.intbaId);
+      const existing = await getDoc(intbaProfileRef(db, trimmedProfile.intbaId));
+      const currentUser = auth.currentUser;
 
-      if (existing.exists()) {
+      if (existing.exists() && existing.data().uid !== currentUser?.uid) {
         setStatus("Ten INTBA ID juz istnieje. Uzyj logowania.");
         setAuthMode("login");
         return;
       }
 
-      await setDoc(userRef(db, id), {
+      const accountUser =
+        currentUser?.email?.toLowerCase() === trimmedProfile.email
+          ? currentUser
+          : (
+              await createUserWithEmailAndPassword(
+                auth,
+                trimmedProfile.email,
+                password,
+              )
+            ).user;
+
+      await updateProfile(accountUser, { displayName: trimmedProfile.name });
+      const accountProfile: PlayerProfile = {
         ...trimmedProfile,
-        id,
+        uid: accountUser.uid,
+        email: accountUser.email || trimmedProfile.email,
+      };
+
+      await setDoc(userRef(db, accountUser.uid), {
+        ...accountProfile,
+        id: accountUser.uid,
+        playerId: intbaId,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
+      await setDoc(intbaProfileRef(db, trimmedProfile.intbaId), {
+        uid: accountUser.uid,
+        intbaId: trimmedProfile.intbaId,
+        email: trimmedProfile.email,
+        createdAt: serverTimestamp(),
+      });
       await setDoc(
-        userGameRef(db, id),
+        userGameRef(db, accountUser.uid),
         {
           gameId: GAME_DOC_ID,
           stats: {
@@ -424,50 +548,52 @@ export function GameShell() {
         { merge: true },
       );
 
-      persistProfile(trimmedProfile);
-      setStatus("Konto INTBA ID utworzone. Mozesz grac.");
+      persistProfile(accountProfile);
+      setStatus("Konto email + haslo gotowe. Mozesz grac.");
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Nie udalo sie.");
+      setStatus(authMessage(error));
     } finally {
       setAuthBusy(false);
     }
   }
 
   async function loginAccount() {
-    const intbaId = profile.intbaId.trim();
+    const email = authEmail.trim().toLowerCase();
+    const password = authPassword.trim();
 
-    if (!intbaId) {
-      setStatus("Podaj INTBA ID, zeby sie zalogowac.");
+    if (!email || !password) {
+      setStatus("Podaj email i haslo, zeby sie zalogowac.");
       return;
     }
 
     if (!firebaseReady) {
-      setStatus("Firebase musi byc podpiety, zeby logowac INTBA ID.");
+      setStatus("Firebase musi byc podpiety, zeby logowac konto.");
       return;
     }
 
     setAuthBusy(true);
     try {
-      const { db } = getFirebaseClient();
-      await ensureAnonymousUser();
-      const id = createPlayerId(intbaId);
-      const snapshot = await getDoc(userRef(db, id));
+      const { auth, db } = getFirebaseClient();
+      const credential = await signInWithEmailAndPassword(auth, email, password);
+      const snapshot = await getDoc(userRef(db, credential.user.uid));
 
       if (!snapshot.exists()) {
-        setStatus("Nie znaleziono INTBA ID. Zarejestruj konto.");
+        setStatus("Konto istnieje w Auth, ale nie ma profilu gry. Zarejestruj profil.");
         setAuthMode("register");
         return;
       }
 
       const savedUser = snapshot.data() as PlayerProfile;
       const nextProfile = {
-        intbaId: savedUser.intbaId || intbaId,
-        name: savedUser.name || profile.name || intbaId,
+        uid: credential.user.uid,
+        email: credential.user.email,
+        intbaId: savedUser.intbaId || "",
+        name: savedUser.name || credential.user.displayName || email,
         avatarUrl: savedUser.avatarUrl || "",
       };
 
       await setDoc(
-        userGameRef(db, id),
+        userGameRef(db, credential.user.uid),
         {
           gameId: GAME_DOC_ID,
           stats: {
@@ -480,9 +606,9 @@ export function GameShell() {
       );
 
       persistProfile(nextProfile);
-      setStatus("Zalogowano przez INTBA ID.");
+      setStatus("Zalogowano przez email i haslo.");
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Nie udalo sie.");
+      setStatus(authMessage(error));
     } finally {
       setAuthBusy(false);
     }
@@ -493,30 +619,51 @@ export function GameShell() {
       ...nextProfile,
       intbaId: nextProfile.intbaId.trim(),
       name: nextProfile.name.trim(),
+      email: nextProfile.email || authEmail.trim().toLowerCase(),
     };
+
+    if (!trimmedProfile.uid) {
+      setStatus("Najpierw zaloguj sie email + haslo.");
+      return null;
+    }
 
     if (!trimmedProfile.intbaId || !trimmedProfile.name) {
       setStatus("Podaj INTBA ID i nazwe gracza.");
       return null;
     }
 
-    persistProfile(trimmedProfile);
-
     if (firebaseReady) {
       const { db } = getFirebaseClient();
-      await ensureAnonymousUser();
-      const id = createPlayerId(trimmedProfile.intbaId);
+      const playerSlug = createPlayerId(trimmedProfile.intbaId);
+      const existing = await getDoc(intbaProfileRef(db, trimmedProfile.intbaId));
+
+      if (existing.exists() && existing.data().uid !== trimmedProfile.uid) {
+        setStatus("Ten INTBA ID jest juz zajety przez inne konto.");
+        return null;
+      }
+
       await setDoc(
-        userRef(db, id),
+        userRef(db, trimmedProfile.uid),
         {
           ...trimmedProfile,
-          id,
+          id: trimmedProfile.uid,
+          playerId: playerSlug,
           updatedAt: serverTimestamp(),
         },
         { merge: true },
       );
       await setDoc(
-        userGameRef(db, id),
+        intbaProfileRef(db, trimmedProfile.intbaId),
+        {
+          uid: trimmedProfile.uid,
+          intbaId: trimmedProfile.intbaId,
+          email: trimmedProfile.email || "",
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true },
+      );
+      await setDoc(
+        userGameRef(db, trimmedProfile.uid),
         {
           gameId: GAME_DOC_ID,
           lastProfileUpdateAt: serverTimestamp(),
@@ -526,11 +673,16 @@ export function GameShell() {
       );
     }
 
+    persistProfile(trimmedProfile);
     setStatus("Profil INTBA zapisany.");
     return trimmedProfile;
   }
 
-  function logoutAccount() {
+  async function logoutAccount() {
+    if (firebaseReady) {
+      const { auth } = getFirebaseClient();
+      await signOut(auth);
+    }
     window.localStorage.removeItem(PROFILE_STORAGE_KEY);
     setIsAuthenticated(false);
     setActiveCode("");
@@ -538,12 +690,13 @@ export function GameShell() {
     setPlayers([]);
     setRoundAnswers({});
     setProfile({ intbaId: "", name: "" });
-    setStatus("Wylogowano z INTBA ID.");
+    setAuthPassword("");
+    setStatus("Wylogowano z konta.");
   }
 
   async function createLobby() {
     if (!isAuthenticated) {
-      setStatus("Najpierw zaloguj sie przez INTBA ID.");
+      setStatus("Najpierw zaloguj sie emailem i haslem.");
       return;
     }
 
@@ -560,7 +713,6 @@ export function GameShell() {
     setIsBusy(true);
     try {
       const { db } = getFirebaseClient();
-      await ensureAnonymousUser();
       const activePlayerId = createPlayerId(savedProfile.intbaId);
       const categories = cleanCategories(settings.categories);
       let code = createRoomCode();
@@ -603,7 +755,7 @@ export function GameShell() {
       });
 
       await setDoc(
-        userGameRef(db, activePlayerId),
+        userGameRef(db, savedProfile.uid || accountId),
         {
           currentLobby: code,
           stats: {
@@ -629,7 +781,7 @@ export function GameShell() {
 
   async function joinLobby() {
     if (!isAuthenticated) {
-      setStatus("Najpierw zaloguj sie przez INTBA ID.");
+      setStatus("Najpierw zaloguj sie emailem i haslem.");
       return;
     }
 
@@ -652,7 +804,6 @@ export function GameShell() {
     setIsBusy(true);
     try {
       const { db } = getFirebaseClient();
-      await ensureAnonymousUser();
       const activePlayerId = createPlayerId(savedProfile.intbaId);
       const snapshot = await getDoc(roomRef(db, code));
 
@@ -691,7 +842,7 @@ export function GameShell() {
       );
 
       await setDoc(
-        userGameRef(db, activePlayerId),
+        userGameRef(db, savedProfile.uid || accountId),
         {
           currentLobby: code,
           stats: {
@@ -784,7 +935,7 @@ export function GameShell() {
       }
 
       batch.set(
-        userGameRef(db, answerDoc.playerId),
+        userGameRef(db, answerDoc.accountId || answerDoc.playerId),
         {
           stats: {
             roundsPlayed: increment(1),
@@ -923,6 +1074,7 @@ export function GameShell() {
       await setDoc(
         answerRef(db, room.code, room.currentRound, playerId),
         {
+          accountId,
           playerId,
           playerName: profile.name,
           avatarUrl: profile.avatarUrl || "",
@@ -950,7 +1102,7 @@ export function GameShell() {
         { merge: true },
       );
       await setDoc(
-        userGameRef(db, playerId),
+        userGameRef(db, accountId),
         {
           stats: {
             answersSubmitted: increment(1),
@@ -998,7 +1150,7 @@ export function GameShell() {
     const { db } = getFirebaseClient();
     await deleteDoc(playerRef(db, room.code, playerId));
     await setDoc(
-      userGameRef(db, playerId),
+      userGameRef(db, accountId),
       {
         currentLobby: null,
         updatedAt: serverTimestamp(),
@@ -1047,9 +1199,11 @@ export function GameShell() {
       if (firebaseReady) {
         const { db } = getFirebaseClient();
         const activePlayerId = createPlayerId(nextProfile.intbaId);
-        await setDoc(userRef(db, activePlayerId), nextProfile, { merge: true });
+        await setDoc(userRef(db, nextProfile.uid || accountId), nextProfile, {
+          merge: true,
+        });
         await setDoc(
-          userGameRef(db, activePlayerId),
+          userGameRef(db, nextProfile.uid || accountId),
           {
             avatarUpdatedAt: serverTimestamp(),
             updatedAt: serverTimestamp(),
@@ -1079,8 +1233,8 @@ export function GameShell() {
 
   const authCopy =
     authMode === "login"
-      ? "Zaloguj sie swoim INTBA ID. Profil i staty gry sa trzymane w tym samym uzytkowniku."
-      : "Zarejestruj INTBA ID do Panstwa Miasta. Nie robimy osobnego konta gry.";
+      ? "Zaloguj sie emailem i haslem. INTBA ID zostaje profilem gracza i trzyma staty gry."
+      : "Utworz konto email + haslo i przypisz do niego swoje INTBA ID.";
 
   return (
     <main className="intba-game-shell">
@@ -1108,7 +1262,7 @@ export function GameShell() {
               <button
                 className="icon-button"
                 type="button"
-                onClick={logoutAccount}
+                onClick={() => void logoutAccount()}
                 title="Wyloguj"
                 aria-label="Wyloguj"
               >
@@ -1116,7 +1270,7 @@ export function GameShell() {
               </button>
             </>
           ) : (
-            <span>INTBA ID</span>
+            <span>Email + haslo</span>
           )}
         </div>
       </header>
@@ -1125,12 +1279,12 @@ export function GameShell() {
         <section className="auth-hero" id="login">
           <div className="signal-canvas" aria-hidden="true" />
           <div className="hero-content">
-            <p className="eyebrow">Panstwa Miasta / INTBA ID</p>
-            <h1>Najpierw INTBA ID, potem lobby i szybka runda.</h1>
+            <p className="eyebrow">Panstwa Miasta / Email + haslo</p>
+            <h1>Najpierw konto, potem lobby i szybka runda.</h1>
             <p className="hero-copy">
-              Konto gry jest podlaczone pod uzytkownika INTBA. W Firebase
-              zapisujemy profil, gre, staty, avatar i ostatnie lobby pod jednym
-              ID.
+              Logowanie dziala przez Firebase Email/Password. INTBA ID zostaje
+              Twoim profilem w grze, a Firebase trzyma uzytkownika, staty,
+              avatar i ostatnie lobby pod jednym UID.
             </p>
             <div className="hero-stats">
               <div>
@@ -1142,8 +1296,8 @@ export function GameShell() {
                 <span>sprawdzanie odpowiedzi</span>
               </div>
               <div>
-                <strong>ID</strong>
-                <span>wspolne statystyki</span>
+                <strong>UID</strong>
+                <span>profil i statystyki</span>
               </div>
             </div>
           </div>
@@ -1174,23 +1328,45 @@ export function GameShell() {
               </button>
             </div>
 
-            <label htmlFor="authIntbaId">INTBA ID</label>
+            <label htmlFor="authEmail">Email</label>
             <input
-              id="authIntbaId"
-              value={profile.intbaId}
-              onChange={(event) =>
-                setProfile((current) => ({
-                  ...current,
-                  intbaId: event.target.value,
-                }))
+              id="authEmail"
+              type="email"
+              value={authEmail}
+              onChange={(event) => setAuthEmail(event.target.value)}
+              placeholder="kontakt@intba.dev"
+              autoComplete="email"
+            />
+
+            <label htmlFor="authPassword">Haslo</label>
+            <input
+              id="authPassword"
+              type="password"
+              value={authPassword}
+              onChange={(event) => setAuthPassword(event.target.value)}
+              placeholder="Minimum 6 znakow"
+              autoComplete={
+                authMode === "login" ? "current-password" : "new-password"
               }
-              placeholder="np. intba_123"
-              autoComplete="username"
             />
 
             {authMode === "register" ? (
-              <label htmlFor="authNick">
-                Nick w grze
+              <>
+                <label htmlFor="authIntbaId">INTBA ID</label>
+                <input
+                  id="authIntbaId"
+                  value={profile.intbaId}
+                  onChange={(event) =>
+                    setProfile((current) => ({
+                      ...current,
+                      intbaId: event.target.value,
+                    }))
+                  }
+                  placeholder="np. intba_123"
+                  autoComplete="username"
+                />
+
+                <label htmlFor="authNick">Nick w grze</label>
                 <input
                   id="authNick"
                   value={profile.name}
@@ -1202,7 +1378,14 @@ export function GameShell() {
                   }
                   placeholder="Twoj nick"
                 />
-              </label>
+              </>
+            ) : null}
+
+            {authMode === "login" ? (
+              <p className="status-message">
+                Nie pamietasz INTBA ID? Wystarczy email i haslo, profil wczyta
+                sie z Firebase.
+              </p>
             ) : null}
 
             <button
@@ -1222,14 +1405,15 @@ export function GameShell() {
               ) : (
                 <UserPlus />
               )}
-              {authMode === "login" ? "Zaloguj INTBA ID" : "Utworz INTBA ID"}
+              {authMode === "login" ? "Zaloguj email + haslo" : "Utworz konto"}
             </button>
 
-            <pre className="json-hint">{`${GAME_COLLECTION}/uzytkownicy/lista/{INTBA_ID}
+            <pre className="json-hint">{`${GAME_COLLECTION}/uzytkownicy/lista/{UID}
+  intbaId
   gra/${GAME_DOC_ID}
   stats.totalScore
   stats.roundsPlayed`}</pre>
-            <p className="status-message">{status || "Czekam na INTBA ID."}</p>
+            <p className="status-message">{status || "Czekam na email i haslo."}</p>
           </aside>
         </section>
       ) : (
