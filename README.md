@@ -39,7 +39,8 @@ NEXT_PUBLIC_FIREBASE_COLLECTION_ROOT=Panstwa Miasta Gra
 
 Aplikacja zapisuje dane pod root collection `Panstwa Miasta Gra`:
 
-- `rejestr/uzytkownicy/{intbaId}` - profile graczy
+- `uzytkownicy/lista/{intbaId}` - profil INTBA ID gracza
+- `uzytkownicy/lista/{intbaId}/gra/panstwa-miasta` - staty gry, ostatnie lobby, licznik logowan i punkty
 - `lobby/pokoje/{kod}` - ustawienia lobby i status rundy
 - `lobby/pokoje/{kod}/gracze/{intbaId}` - gracze, gotowosc i punkty
 - `lobby/pokoje/{kod}/rundy/{nr}/odpowiedzi/{intbaId}` - odpowiedzi rund

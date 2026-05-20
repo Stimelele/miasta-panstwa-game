@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="INTBA">
+  <defs>
+    <radialGradient id="glow" cx="50%" cy="45%" r="70%">
+      <stop offset="0" stop-color="#ffad57"/>
+      <stop offset="0.42" stop-color="#ff7a1a"/>
+      <stop offset="1" stop-color="#151515"/>
+    </radialGradient>
+    <filter id="shadow" x="-25%" y="-25%" width="150%" height="150%">
+      <feDropShadow dx="0" dy="0" stdDeviation="24" flood-color="#ff7a1a" flood-opacity=".45"/>
+      <feDropShadow dx="0" dy="24" stdDeviation="32" flood-color="#000000" flood-opacity=".5"/>
+    </filter>
+  </defs>
+  <rect width="512" height="512" rx="116" fill="#070707"/>
+  <rect x="34" y="34" width="444" height="444" rx="92" fill="url(#glow)" filter="url(#shadow)"/>
+  <rect x="58" y="58" width="396" height="396" rx="72" fill="#0b0b0b" opacity=".72"/>
+  <path d="M174 138h164v54h-52v128h52v54H174v-54h52V192h-52z" fill="#fff7ef"/>
+  <path d="M164 394h184" stroke="#ffad57" stroke-width="18" stroke-linecap="round"/>
+</svg>

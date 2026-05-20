@@ -4,22 +4,27 @@
 
 import {
   Activity,
+  BadgeCheck,
+  Bot,
+  BrainCircuit,
   Check,
   Copy,
   Crown,
   Dice5,
   Eye,
+  Image as ImageIcon,
   Loader2,
   LogIn,
+  LogOut,
   Plus,
   Play,
   Settings2,
   ShieldCheck,
-  Sparkles,
   Timer,
   Trash2,
   Upload,
   User,
+  UserPlus,
   Users,
   Wand2,
   X,
@@ -39,6 +44,7 @@ import {
   writeBatch,
   type Firestore,
 } from "firebase/firestore";
+import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   clampAnswerTime,
@@ -65,10 +71,11 @@ import {
 } from "@/lib/firebase";
 import { ruleValidateAnswer } from "@/lib/validation";
 
-const PROFILE_STORAGE_KEY = "panstwa-miasta-profile";
+const PROFILE_STORAGE_KEY = "panstwa-miasta-intba-session";
+const GAME_DOC_ID = "panstwa-miasta";
 
 const initialSettings: RoomSettings = {
-  name: "Wieczor Panstwa Miasta",
+  name: "INTBA Panstwa Miasta",
   maxPlayers: 8,
   answerTimeSec: 90,
   allowAiValidation: true,
@@ -76,7 +83,11 @@ const initialSettings: RoomSettings = {
 };
 
 function userRef(db: Firestore, playerId: string) {
-  return doc(db, GAME_COLLECTION, "rejestr", "uzytkownicy", playerId);
+  return doc(db, GAME_COLLECTION, "uzytkownicy", "lista", playerId);
+}
+
+function userGameRef(db: Firestore, playerId: string) {
+  return doc(userRef(db, playerId), "gra", GAME_DOC_ID);
 }
 
 function roomRef(db: Firestore, code: string) {
@@ -127,12 +138,14 @@ function formatTime(seconds: number) {
 }
 
 function getInitials(name: string) {
-  return name
-    .split(/\s+/)
-    .map((part) => part[0])
-    .join("")
-    .slice(0, 2)
-    .toUpperCase();
+  return (
+    name
+      .split(/\s+/)
+      .map((part) => part[0])
+      .join("")
+      .slice(0, 2)
+      .toUpperCase() || "I"
+  );
 }
 
 function statusText(status: GameRoom["status"]) {
@@ -151,6 +164,9 @@ export function GameShell() {
     intbaId: "",
     name: "",
   });
+  const [authMode, setAuthMode] = useState<"login" | "register">("login");
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [authBusy, setAuthBusy] = useState(false);
   const [settings, setSettings] = useState<RoomSettings>(initialSettings);
   const [newCategory, setNewCategory] = useState("");
   const [joinCode, setJoinCode] = useState("");
@@ -212,12 +228,19 @@ export function GameShell() {
 
   useEffect(() => {
     const saved = window.localStorage.getItem(PROFILE_STORAGE_KEY);
-    if (saved) {
-      try {
-        setProfile(JSON.parse(saved) as PlayerProfile);
-      } catch {
-        window.localStorage.removeItem(PROFILE_STORAGE_KEY);
+    if (!saved) {
+      return;
+    }
+
+    try {
+      const savedProfile = JSON.parse(saved) as PlayerProfile;
+      if (savedProfile.intbaId && savedProfile.name) {
+        setProfile(savedProfile);
+        setIsAuthenticated(true);
+        setStatus("Sesja INTBA ID przywrocona.");
       }
+    } catch {
+      window.localStorage.removeItem(PROFILE_STORAGE_KEY);
     }
   }, []);
 
@@ -341,6 +364,130 @@ export function GameShell() {
     }
   }, [allReady, room?.status, revealRoom]);
 
+  function persistProfile(nextProfile: PlayerProfile) {
+    window.localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify(nextProfile));
+    setProfile(nextProfile);
+    setIsAuthenticated(true);
+  }
+
+  async function registerAccount() {
+    const trimmedProfile = {
+      ...profile,
+      intbaId: profile.intbaId.trim(),
+      name: profile.name.trim(),
+    };
+
+    if (!trimmedProfile.intbaId || !trimmedProfile.name) {
+      setStatus("Do rejestracji podaj INTBA ID i nick.");
+      return;
+    }
+
+    if (!firebaseReady) {
+      setStatus("Firebase musi byc podpiety, zeby rejestrowac INTBA ID.");
+      return;
+    }
+
+    setAuthBusy(true);
+    try {
+      const { db } = getFirebaseClient();
+      await ensureAnonymousUser();
+      const id = createPlayerId(trimmedProfile.intbaId);
+      const existing = await getDoc(userRef(db, id));
+
+      if (existing.exists()) {
+        setStatus("Ten INTBA ID juz istnieje. Uzyj logowania.");
+        setAuthMode("login");
+        return;
+      }
+
+      await setDoc(userRef(db, id), {
+        ...trimmedProfile,
+        id,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+      await setDoc(
+        userGameRef(db, id),
+        {
+          gameId: GAME_DOC_ID,
+          stats: {
+            totalScore: 0,
+            roundsPlayed: 0,
+            gamesCreated: 0,
+            gamesJoined: 0,
+            answersSubmitted: 0,
+            loginCount: 1,
+          },
+          lastLoginAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true },
+      );
+
+      persistProfile(trimmedProfile);
+      setStatus("Konto INTBA ID utworzone. Mozesz grac.");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Nie udalo sie.");
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  async function loginAccount() {
+    const intbaId = profile.intbaId.trim();
+
+    if (!intbaId) {
+      setStatus("Podaj INTBA ID, zeby sie zalogowac.");
+      return;
+    }
+
+    if (!firebaseReady) {
+      setStatus("Firebase musi byc podpiety, zeby logowac INTBA ID.");
+      return;
+    }
+
+    setAuthBusy(true);
+    try {
+      const { db } = getFirebaseClient();
+      await ensureAnonymousUser();
+      const id = createPlayerId(intbaId);
+      const snapshot = await getDoc(userRef(db, id));
+
+      if (!snapshot.exists()) {
+        setStatus("Nie znaleziono INTBA ID. Zarejestruj konto.");
+        setAuthMode("register");
+        return;
+      }
+
+      const savedUser = snapshot.data() as PlayerProfile;
+      const nextProfile = {
+        intbaId: savedUser.intbaId || intbaId,
+        name: savedUser.name || profile.name || intbaId,
+        avatarUrl: savedUser.avatarUrl || "",
+      };
+
+      await setDoc(
+        userGameRef(db, id),
+        {
+          gameId: GAME_DOC_ID,
+          stats: {
+            loginCount: increment(1),
+          },
+          lastLoginAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true },
+      );
+
+      persistProfile(nextProfile);
+      setStatus("Zalogowano przez INTBA ID.");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Nie udalo sie.");
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
   async function saveProfile(nextProfile = profile) {
     const trimmedProfile = {
       ...nextProfile,
@@ -350,35 +497,58 @@ export function GameShell() {
 
     if (!trimmedProfile.intbaId || !trimmedProfile.name) {
       setStatus("Podaj INTBA ID i nazwe gracza.");
-      return false;
+      return null;
     }
 
-    window.localStorage.setItem(
-      PROFILE_STORAGE_KEY,
-      JSON.stringify(trimmedProfile),
-    );
-    setProfile(trimmedProfile);
+    persistProfile(trimmedProfile);
 
     if (firebaseReady) {
       const { db } = getFirebaseClient();
       await ensureAnonymousUser();
+      const id = createPlayerId(trimmedProfile.intbaId);
       await setDoc(
-        userRef(db, createPlayerId(trimmedProfile.intbaId)),
+        userRef(db, id),
         {
           ...trimmedProfile,
-          id: createPlayerId(trimmedProfile.intbaId),
+          id,
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true },
+      );
+      await setDoc(
+        userGameRef(db, id),
+        {
+          gameId: GAME_DOC_ID,
+          lastProfileUpdateAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
         },
         { merge: true },
       );
     }
 
-    setStatus("Profil zapisany.");
-    return true;
+    setStatus("Profil INTBA zapisany.");
+    return trimmedProfile;
+  }
+
+  function logoutAccount() {
+    window.localStorage.removeItem(PROFILE_STORAGE_KEY);
+    setIsAuthenticated(false);
+    setActiveCode("");
+    setRoom(null);
+    setPlayers([]);
+    setRoundAnswers({});
+    setProfile({ intbaId: "", name: "" });
+    setStatus("Wylogowano z INTBA ID.");
   }
 
   async function createLobby() {
-    if (!(await saveProfile())) {
+    if (!isAuthenticated) {
+      setStatus("Najpierw zaloguj sie przez INTBA ID.");
+      return;
+    }
+
+    const savedProfile = await saveProfile();
+    if (!savedProfile) {
       return;
     }
 
@@ -391,6 +561,7 @@ export function GameShell() {
     try {
       const { db } = getFirebaseClient();
       await ensureAnonymousUser();
+      const activePlayerId = createPlayerId(savedProfile.intbaId);
       const categories = cleanCategories(settings.categories);
       let code = createRoomCode();
       let ref = roomRef(db, code);
@@ -407,7 +578,7 @@ export function GameShell() {
       await setDoc(ref, {
         code,
         name: settings.name.trim() || "Panstwa Miasta",
-        hostId: playerId,
+        hostId: activePlayerId,
         maxPlayers: clampPlayers(settings.maxPlayers),
         answerTimeSec: clampAnswerTime(settings.answerTimeSec),
         allowAiValidation: settings.allowAiValidation,
@@ -421,15 +592,29 @@ export function GameShell() {
         updatedAt: serverTimestamp(),
       });
 
-      await setDoc(playerRef(db, code, playerId), {
-        ...profile,
-        id: playerId,
+      await setDoc(playerRef(db, code, activePlayerId), {
+        ...savedProfile,
+        id: activePlayerId,
         isHost: true,
         ready: false,
         score: 0,
         joinedAt: serverTimestamp(),
         lastSeenAt: serverTimestamp(),
       });
+
+      await setDoc(
+        userGameRef(db, activePlayerId),
+        {
+          currentLobby: code,
+          stats: {
+            gamesCreated: increment(1),
+            gamesJoined: increment(1),
+          },
+          lastPlayedAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true },
+      );
 
       setSettingsDirty(false);
       setActiveCode(code);
@@ -443,7 +628,13 @@ export function GameShell() {
   }
 
   async function joinLobby() {
-    if (!(await saveProfile())) {
+    if (!isAuthenticated) {
+      setStatus("Najpierw zaloguj sie przez INTBA ID.");
+      return;
+    }
+
+    const savedProfile = await saveProfile();
+    if (!savedProfile) {
       return;
     }
 
@@ -462,6 +653,7 @@ export function GameShell() {
     try {
       const { db } = getFirebaseClient();
       await ensureAnonymousUser();
+      const activePlayerId = createPlayerId(savedProfile.intbaId);
       const snapshot = await getDoc(roomRef(db, code));
 
       if (!snapshot.exists()) {
@@ -471,7 +663,9 @@ export function GameShell() {
 
       const targetRoom = snapshot.data() as GameRoom;
       const roomPlayers = await getDocs(playersRef(db, code));
-      const alreadyInRoom = roomPlayers.docs.some((docSnap) => docSnap.id === playerId);
+      const alreadyInRoom = roomPlayers.docs.some(
+        (docSnap) => docSnap.id === activePlayerId,
+      );
 
       if (!alreadyInRoom && roomPlayers.size >= targetRoom.maxPlayers) {
         setStatus("Lobby jest pelne.");
@@ -479,19 +673,32 @@ export function GameShell() {
       }
 
       await setDoc(
-        playerRef(db, code, playerId),
+        playerRef(db, code, activePlayerId),
         {
-          ...profile,
-          id: playerId,
-          isHost: targetRoom.hostId === playerId,
+          ...savedProfile,
+          id: activePlayerId,
+          isHost: targetRoom.hostId === activePlayerId,
           ready: false,
           score: alreadyInRoom
             ? (roomPlayers.docs
-                .find((docSnap) => docSnap.id === playerId)
+                .find((docSnap) => docSnap.id === activePlayerId)
                 ?.data().score as number | undefined) || 0
             : 0,
           joinedAt: serverTimestamp(),
           lastSeenAt: serverTimestamp(),
+        },
+        { merge: true },
+      );
+
+      await setDoc(
+        userGameRef(db, activePlayerId),
+        {
+          currentLobby: code,
+          stats: {
+            gamesJoined: increment(alreadyInRoom ? 0 : 1),
+          },
+          lastPlayedAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
         },
         { merge: true },
       );
@@ -575,6 +782,20 @@ export function GameShell() {
           score: increment(points),
         });
       }
+
+      batch.set(
+        userGameRef(db, answerDoc.playerId),
+        {
+          stats: {
+            roundsPlayed: increment(1),
+            totalScore: increment(points),
+          },
+          lastScore: points,
+          lastRoundAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true },
+      );
     });
 
     batch.update(roomRef(db, room.code), {
@@ -642,7 +863,11 @@ export function GameShell() {
     category: GameCategory,
     answer: string,
   ): Promise<AnswerCheck> {
-    const fallback = ruleValidateAnswer(category.name, room?.letter || "", answer);
+    const fallback = ruleValidateAnswer(
+      category.name,
+      room?.letter || "",
+      answer,
+    );
 
     if (!room?.allowAiValidation) {
       return fallback;
@@ -724,6 +949,17 @@ export function GameShell() {
         { answers: checkedAnswers },
         { merge: true },
       );
+      await setDoc(
+        userGameRef(db, playerId),
+        {
+          stats: {
+            answersSubmitted: increment(1),
+          },
+          lastSubmitAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true },
+      );
       setStatus("Odpowiedzi zapisane. Czekamy na reszte graczy.");
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Nie udalo sie.");
@@ -761,6 +997,14 @@ export function GameShell() {
 
     const { db } = getFirebaseClient();
     await deleteDoc(playerRef(db, room.code, playerId));
+    await setDoc(
+      userGameRef(db, playerId),
+      {
+        currentLobby: null,
+        updatedAt: serverTimestamp(),
+      },
+      { merge: true },
+    );
     setActiveCode("");
     setRoom(null);
     setPlayers([]);
@@ -773,7 +1017,8 @@ export function GameShell() {
       return;
     }
 
-    if (!(await saveProfile())) {
+    const savedProfile = await saveProfile();
+    if (!savedProfile) {
       return;
     }
 
@@ -781,7 +1026,7 @@ export function GameShell() {
     try {
       const formData = new FormData();
       formData.set("file", file);
-      formData.set("intbaId", profile.intbaId);
+      formData.set("intbaId", savedProfile.intbaId);
       const response = await fetch("/api/avatar", {
         method: "POST",
         body: formData,
@@ -796,18 +1041,23 @@ export function GameShell() {
         return;
       }
 
-      const nextProfile = { ...profile, avatarUrl: payload.url };
-      setProfile(nextProfile);
-      window.localStorage.setItem(
-        PROFILE_STORAGE_KEY,
-        JSON.stringify(nextProfile),
-      );
+      const nextProfile = { ...savedProfile, avatarUrl: payload.url };
+      persistProfile(nextProfile);
 
       if (firebaseReady) {
         const { db } = getFirebaseClient();
-        await setDoc(userRef(db, playerId), nextProfile, { merge: true });
+        const activePlayerId = createPlayerId(nextProfile.intbaId);
+        await setDoc(userRef(db, activePlayerId), nextProfile, { merge: true });
+        await setDoc(
+          userGameRef(db, activePlayerId),
+          {
+            avatarUpdatedAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          },
+          { merge: true },
+        );
         if (activeCode) {
-          await setDoc(playerRef(db, activeCode, playerId), nextProfile, {
+          await setDoc(playerRef(db, activeCode, activePlayerId), nextProfile, {
             merge: true,
           });
         }
@@ -827,602 +1077,697 @@ export function GameShell() {
     setStatus("Kod lobby skopiowany.");
   }
 
+  const authCopy =
+    authMode === "login"
+      ? "Zaloguj sie swoim INTBA ID. Profil i staty gry sa trzymane w tym samym uzytkowniku."
+      : "Zarejestruj INTBA ID do Panstwa Miasta. Nie robimy osobnego konta gry.";
+
   return (
-    <main className="min-h-screen bg-[#f6f7f1] text-[#19211d]">
-      <section className="border-b border-[#d4d8c8] bg-[#fdfdf8]">
-        <div className="mx-auto grid w-full max-w-7xl gap-8 px-4 py-6 md:grid-cols-[1.1fr_0.9fr] md:px-8">
-          <div className="flex min-w-0 flex-col justify-center gap-5">
-            <div className="flex flex-wrap items-center gap-3 text-sm font-semibold uppercase tracking-[0.16em] text-[#4d6759]">
-              <span>INTBA ID</span>
-              <span className="h-1.5 w-1.5 rounded-full bg-[#d55138]" />
-              <span>Panstwa Miasta online</span>
-            </div>
-            <div className="flex flex-col gap-3">
-              <h1 className="text-4xl font-black leading-tight text-[#17201b] sm:text-5xl">
-                Gra jak na kartce, tylko z lobby, timerem i sprawdzaniem AI.
-              </h1>
-              <p className="max-w-2xl text-base leading-7 text-[#536057]">
-                Stworz pokoj do 12 osob, wybierz kategorie, ustaw czas i
-                losuj litere. Gracze klikaja gotowe, a po komplecie odpowiedzi
-                automatycznie sie odslaniaja.
-              </p>
-            </div>
-          </div>
-          <div className="relative min-h-56 overflow-hidden rounded-[8px] border border-[#c9d0bf] bg-[#eaf0df] shadow-sm">
-            <img
-              src="/paper-cards.svg"
-              alt=""
-              className="h-full min-h-56 w-full object-cover"
-            />
-          </div>
+    <main className="intba-game-shell">
+      <div className="intro-loader" aria-hidden="true">
+        <div className="intro-loader-card">
+          <img src="/intba-logo.svg" alt="" />
+          <span>INTBA</span>
         </div>
-      </section>
+      </div>
 
-      <section className="mx-auto grid w-full max-w-7xl gap-5 px-4 py-5 md:grid-cols-[340px_1fr] md:px-8">
-        <aside className="flex flex-col gap-5">
-          <section className="rounded-[8px] border border-[#d4d8c8] bg-white p-4 shadow-sm">
-            <div className="mb-4 flex items-center justify-between">
-              <h2 className="flex items-center gap-2 text-lg font-bold">
-                <User size={20} /> Profil gracza
-              </h2>
-              <span className="rounded-full bg-[#e6f0eb] px-3 py-1 text-xs font-bold text-[#2f6249]">
-                INTBA
-              </span>
-            </div>
-            <div className="flex items-center gap-3">
-              <div className="grid h-16 w-16 shrink-0 place-items-center overflow-hidden rounded-full border border-[#cfd7c8] bg-[#f1f4ea] text-lg font-black text-[#385845]">
-                {profile.avatarUrl ? (
-                  <img
-                    src={profile.avatarUrl}
-                    alt=""
-                    className="h-full w-full object-cover"
-                  />
-                ) : (
-                  getInitials(profile.name || "PM")
-                )}
+      <header className="topbar" aria-label="Nawigacja gry">
+        <Link className="brand" href="/" aria-label="INTBA Panstwa Miasta">
+          <span className="brand-mark">I</span>
+          <span>INTBA</span>
+        </Link>
+        <nav className="nav-links" aria-label="Sekcje gry">
+          <a href="#lobby">Lobby</a>
+          <a href="#ustawienia">Ustawienia</a>
+          <a href="#ranking">Gracze</a>
+        </nav>
+        <div className="topbar-user">
+          {isAuthenticated ? (
+            <>
+              <span>{profile.name}</span>
+              <button
+                className="icon-button"
+                type="button"
+                onClick={logoutAccount}
+                title="Wyloguj"
+                aria-label="Wyloguj"
+              >
+                <LogOut />
+              </button>
+            </>
+          ) : (
+            <span>INTBA ID</span>
+          )}
+        </div>
+      </header>
+
+      {!isAuthenticated ? (
+        <section className="auth-hero" id="login">
+          <div className="signal-canvas" aria-hidden="true" />
+          <div className="hero-content">
+            <p className="eyebrow">Panstwa Miasta / INTBA ID</p>
+            <h1>Najpierw INTBA ID, potem lobby i szybka runda.</h1>
+            <p className="hero-copy">
+              Konto gry jest podlaczone pod uzytkownika INTBA. W Firebase
+              zapisujemy profil, gre, staty, avatar i ostatnie lobby pod jednym
+              ID.
+            </p>
+            <div className="hero-stats">
+              <div>
+                <strong>12</strong>
+                <span>osob w lobby</span>
               </div>
-              <label className="inline-flex h-10 cursor-pointer items-center gap-2 rounded-[8px] border border-[#bac6b5] px-3 text-sm font-bold hover:bg-[#f6f7f1]">
-                {avatarBusy ? <Loader2 size={16} className="animate-spin" /> : <Upload size={16} />}
-                Avatar
-                <input
-                  type="file"
-                  accept="image/png,image/jpeg,image/webp"
-                  className="sr-only"
-                  onChange={(event) => uploadAvatar(event.target.files?.[0] || null)}
-                />
-              </label>
+              <div>
+                <strong>AI</strong>
+                <span>sprawdzanie odpowiedzi</span>
+              </div>
+              <div>
+                <strong>ID</strong>
+                <span>wspolne statystyki</span>
+              </div>
             </div>
-            <label className="mt-4 block text-sm font-bold text-[#344138]">
-              INTBA ID
-              <input
-                value={profile.intbaId}
-                onChange={(event) =>
-                  setProfile((current) => ({
-                    ...current,
-                    intbaId: event.target.value,
-                  }))
-                }
-                className="mt-1 h-11 w-full rounded-[8px] border border-[#cbd3c3] px-3 outline-none focus:border-[#2f6249]"
-                placeholder="np. intba_123"
-              />
-            </label>
-            <label className="mt-3 block text-sm font-bold text-[#344138]">
-              Nazwa w grze
-              <input
-                value={profile.name}
-                onChange={(event) =>
-                  setProfile((current) => ({ ...current, name: event.target.value }))
-                }
-                className="mt-1 h-11 w-full rounded-[8px] border border-[#cbd3c3] px-3 outline-none focus:border-[#2f6249]"
-                placeholder="Twoj nick"
-              />
-            </label>
-            <button
-              type="button"
-              onClick={() => void saveProfile()}
-              className="mt-4 inline-flex h-11 w-full items-center justify-center gap-2 rounded-[8px] bg-[#23352c] px-4 text-sm font-black text-white hover:bg-[#2f4c3d]"
-            >
-              <Check size={17} /> Zapisz profil
-            </button>
-          </section>
+          </div>
 
-          <section className="rounded-[8px] border border-[#d4d8c8] bg-white p-4 shadow-sm">
-            <div className="mb-4 flex items-center justify-between">
-              <h2 className="flex items-center gap-2 text-lg font-bold">
-                <Settings2 size={20} /> Ustawienia
-              </h2>
-              <span className="text-xs font-bold text-[#6b756d]">
-                max 12 osob
-              </span>
+          <aside className="auth-card">
+            <div className="auth-card-head">
+              <User />
+              <div>
+                <h2>{authMode === "login" ? "Logowanie" : "Rejestracja"}</h2>
+                <p>{authCopy}</p>
+              </div>
             </div>
-            <label className="block text-sm font-bold text-[#344138]">
-              Nazwa lobby
-              <input
-                value={settings.name}
-                onChange={(event) => {
-                  setSettings((current) => ({
-                    ...current,
-                    name: event.target.value,
-                  }));
-                  setSettingsDirty(true);
-                }}
-                className="mt-1 h-11 w-full rounded-[8px] border border-[#cbd3c3] px-3 outline-none focus:border-[#2f6249]"
-              />
-            </label>
-            <div className="mt-3 grid grid-cols-2 gap-3">
-              <label className="block text-sm font-bold text-[#344138]">
-                Gracze
-                <input
-                  type="number"
-                  min={2}
-                  max={12}
-                  value={settings.maxPlayers}
-                  onChange={(event) => {
-                    setSettings((current) => ({
-                      ...current,
-                      maxPlayers: clampPlayers(Number(event.target.value)),
-                    }));
-                    setSettingsDirty(true);
-                  }}
-                  className="mt-1 h-11 w-full rounded-[8px] border border-[#cbd3c3] px-3 outline-none focus:border-[#2f6249]"
-                />
-              </label>
-              <label className="block text-sm font-bold text-[#344138]">
-                Czas
-                <input
-                  type="number"
-                  min={20}
-                  max={300}
-                  value={settings.answerTimeSec}
-                  onChange={(event) => {
-                    setSettings((current) => ({
-                      ...current,
-                      answerTimeSec: clampAnswerTime(Number(event.target.value)),
-                    }));
-                    setSettingsDirty(true);
-                  }}
-                  className="mt-1 h-11 w-full rounded-[8px] border border-[#cbd3c3] px-3 outline-none focus:border-[#2f6249]"
-                />
-              </label>
-            </div>
-            <label className="mt-4 flex cursor-pointer items-center justify-between rounded-[8px] border border-[#cbd3c3] p-3 text-sm font-bold">
-              <span className="flex items-center gap-2">
-                <Sparkles size={17} /> Sprawdzanie AI
-              </span>
-              <input
-                type="checkbox"
-                checked={settings.allowAiValidation}
-                onChange={(event) => {
-                  setSettings((current) => ({
-                    ...current,
-                    allowAiValidation: event.target.checked,
-                  }));
-                  setSettingsDirty(true);
-                }}
-                className="h-5 w-5 accent-[#d55138]"
-              />
-            </label>
-          </section>
 
-          <section className="rounded-[8px] border border-[#d4d8c8] bg-white p-4 shadow-sm">
-            <h2 className="mb-4 flex items-center gap-2 text-lg font-bold">
-              <Wand2 size={20} /> Kategorie
-            </h2>
-            <div className="flex flex-wrap gap-2">
-              {settings.categories.map((category) => (
-                <span
-                  key={category.id}
-                  className="inline-flex items-center gap-2 rounded-full border border-[#cbd3c3] bg-[#f8faf4] px-3 py-1 text-sm font-bold"
-                >
-                  {category.name}
-                  <button
-                    type="button"
-                    onClick={() => removeCategory(category.id)}
-                    disabled={category.locked}
-                    title={
-                      category.locked
-                        ? "Tej kategorii nie usuwamy"
-                        : "Usun kategorie"
-                    }
-                    className="grid h-5 w-5 place-items-center rounded-full hover:bg-[#ead4cf] disabled:cursor-not-allowed disabled:opacity-35"
-                  >
-                    <X size={13} />
-                  </button>
-                </span>
-              ))}
+            <div className="segmented-control" aria-label="Tryb konta">
+              <button
+                type="button"
+                className={authMode === "login" ? "active" : ""}
+                onClick={() => setAuthMode("login")}
+              >
+                <LogIn /> Login
+              </button>
+              <button
+                type="button"
+                className={authMode === "register" ? "active" : ""}
+                onClick={() => setAuthMode("register")}
+              >
+                <UserPlus /> Rejestruj
+              </button>
             </div>
-            <div className="mt-4 flex gap-2">
-              <input
-                value={newCategory}
-                onChange={(event) => setNewCategory(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") {
-                    event.preventDefault();
-                    addCategory();
+
+            <label htmlFor="authIntbaId">INTBA ID</label>
+            <input
+              id="authIntbaId"
+              value={profile.intbaId}
+              onChange={(event) =>
+                setProfile((current) => ({
+                  ...current,
+                  intbaId: event.target.value,
+                }))
+              }
+              placeholder="np. intba_123"
+              autoComplete="username"
+            />
+
+            {authMode === "register" ? (
+              <label htmlFor="authNick">
+                Nick w grze
+                <input
+                  id="authNick"
+                  value={profile.name}
+                  onChange={(event) =>
+                    setProfile((current) => ({
+                      ...current,
+                      name: event.target.value,
+                    }))
                   }
-                }}
-                className="h-11 min-w-0 flex-1 rounded-[8px] border border-[#cbd3c3] px-3 outline-none focus:border-[#2f6249]"
-                placeholder="np. Film, marka, sport"
-              />
-              <button
-                type="button"
-                onClick={addCategory}
-                title="Dodaj kategorie"
-                className="grid h-11 w-11 place-items-center rounded-[8px] bg-[#d55138] text-white hover:bg-[#bc422c]"
-              >
-                <Plus size={20} />
-              </button>
-            </div>
-            {room && isHost && room.status === "lobby" ? (
-              <button
-                type="button"
-                onClick={() => void saveRoomSettings()}
-                className="mt-4 inline-flex h-11 w-full items-center justify-center gap-2 rounded-[8px] border border-[#2f6249] px-4 text-sm font-black text-[#2f6249] hover:bg-[#e8f1ec]"
-              >
-                <Check size={17} /> Zapisz ustawienia lobby
-              </button>
+                  placeholder="Twoj nick"
+                />
+              </label>
             ) : null}
-          </section>
-        </aside>
 
-        <div className="flex flex-col gap-5">
-          {!firebaseReady ? (
-            <section className="rounded-[8px] border border-[#d8b66c] bg-[#fff8e6] p-4 text-sm leading-6 text-[#5b4720]">
-              <strong>Firebase jeszcze nie jest podpiety.</strong> Dodaj pozniej
-              config w `.env.local`; aplikacja jest gotowa na kolekcje
-              `Panstwa Miasta Gra`, rejestr uzytkownikow, lobby, rundy i
-              odpowiedzi.
-            </section>
-          ) : null}
+            <button
+              className="primary-action wide-action"
+              type="button"
+              onClick={() =>
+                authMode === "login"
+                  ? void loginAccount()
+                  : void registerAccount()
+              }
+              disabled={authBusy}
+            >
+              {authBusy ? (
+                <Loader2 className="spin-icon" />
+              ) : authMode === "login" ? (
+                <LogIn />
+              ) : (
+                <UserPlus />
+              )}
+              {authMode === "login" ? "Zaloguj INTBA ID" : "Utworz INTBA ID"}
+            </button>
 
-          {!room ? (
-            <section className="grid gap-5 lg:grid-cols-2">
-              <div className="rounded-[8px] border border-[#d4d8c8] bg-white p-5 shadow-sm">
-                <h2 className="mb-2 flex items-center gap-2 text-2xl font-black">
-                  <Users size={24} /> Stworz lobby
-                </h2>
-                <p className="mb-5 text-sm leading-6 text-[#59645d]">
-                  Host ustawia limit graczy, czas, kategorie i tryb sprawdzania.
-                </p>
+            <pre className="json-hint">{`${GAME_COLLECTION}/uzytkownicy/lista/{INTBA_ID}
+  gra/${GAME_DOC_ID}
+  stats.totalScore
+  stats.roundsPlayed`}</pre>
+            <p className="status-message">{status || "Czekam na INTBA ID."}</p>
+          </aside>
+        </section>
+      ) : (
+        <>
+          <section className="game-hero">
+            <div className="signal-canvas" aria-hidden="true" />
+            <div className="hero-content">
+              <p className="eyebrow">INTBA game room</p>
+              <h1>Panstwa Miasta w stylu INTBA.</h1>
+              <p className="hero-copy">
+                Lobby, gotowosc graczy, losowana litera, kategorie hosta,
+                timer, avatar z GitHuba i sprawdzanie odpowiedzi przez AI.
+              </p>
+              <div className="hero-actions">
                 <button
+                  className="primary-action"
                   type="button"
                   onClick={() => void createLobby()}
                   disabled={isBusy || !firebaseReady}
-                  className="inline-flex h-12 w-full items-center justify-center gap-2 rounded-[8px] bg-[#23352c] px-5 text-sm font-black text-white hover:bg-[#2f4c3d] disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  {isBusy ? <Loader2 className="animate-spin" size={18} /> : <Play size={18} />}
-                  Utworz pokoj
+                  {isBusy ? <Loader2 className="spin-icon" /> : <Play />}
+                  Stworz lobby
                 </button>
-              </div>
-
-              <div className="rounded-[8px] border border-[#d4d8c8] bg-white p-5 shadow-sm">
-                <h2 className="mb-2 flex items-center gap-2 text-2xl font-black">
-                  <LogIn size={24} /> Dolacz
-                </h2>
-                <p className="mb-5 text-sm leading-6 text-[#59645d]">
-                  Wpisz kod od hosta i wskakuj do tej samej tablicy odpowiedzi.
-                </p>
-                <div className="flex gap-2">
-                  <input
-                    value={joinCode}
-                    onChange={(event) =>
-                      setJoinCode(event.target.value.toUpperCase())
-                    }
-                    className="h-12 min-w-0 flex-1 rounded-[8px] border border-[#cbd3c3] px-3 text-lg font-black tracking-[0.14em] outline-none focus:border-[#2f6249]"
-                    placeholder="KOD"
-                    maxLength={6}
-                  />
-                  <button
-                    type="button"
-                    onClick={() => void joinLobby()}
-                    disabled={isBusy || !firebaseReady}
-                    className="inline-flex h-12 items-center justify-center gap-2 rounded-[8px] bg-[#d55138] px-5 text-sm font-black text-white hover:bg-[#bc422c] disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    <LogIn size={18} /> Wejdz
-                  </button>
-                </div>
-              </div>
-            </section>
-          ) : (
-            <section className="flex flex-col gap-5">
-              <div className="rounded-[8px] border border-[#d4d8c8] bg-white p-5 shadow-sm">
-                <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-                  <div>
-                    <div className="flex flex-wrap items-center gap-2 text-sm font-bold text-[#617066]">
-                      <span className="rounded-full bg-[#eef3e9] px-3 py-1">
-                        {statusText(room.status)}
-                      </span>
-                      <span>{players.length}/{room.maxPlayers} graczy</span>
-                      <span>{room.answerTimeSec}s na odpowiedzi</span>
-                    </div>
-                    <h2 className="mt-2 text-3xl font-black">{room.name}</h2>
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      onClick={copyCode}
-                      className="inline-flex h-11 items-center gap-2 rounded-[8px] border border-[#cbd3c3] px-4 text-sm font-black hover:bg-[#f6f7f1]"
-                    >
-                      <Copy size={17} /> {room.code}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void leaveRoom()}
-                      className="inline-flex h-11 items-center gap-2 rounded-[8px] border border-[#dbc6bf] px-4 text-sm font-black text-[#9d3725] hover:bg-[#fff2ef]"
-                    >
-                      <Trash2 size={17} /> Wyjdz
-                    </button>
-                    {isHost ? (
-                      <button
-                        type="button"
-                        onClick={() => void startRound()}
-                        disabled={isBusy || players.length === 0}
-                        className="inline-flex h-11 items-center gap-2 rounded-[8px] bg-[#23352c] px-4 text-sm font-black text-white hover:bg-[#2f4c3d] disabled:opacity-50"
-                      >
-                        {room.status === "review" ? (
-                          <Dice5 size={17} />
-                        ) : (
-                          <Play size={17} />
-                        )}
-                        {room.status === "review"
-                          ? "Nastepna runda"
-                          : "Start"}
-                      </button>
-                    ) : null}
-                  </div>
-                </div>
-              </div>
-
-              <div className="grid gap-5 xl:grid-cols-[1fr_300px]">
-                <section className="rounded-[8px] border border-[#d4d8c8] bg-white p-5 shadow-sm">
-                  {room.status === "lobby" ? (
-                    <div className="flex min-h-80 flex-col items-center justify-center gap-4 text-center">
-                      <Dice5 size={54} className="text-[#d55138]" />
-                      <div>
-                        <h3 className="text-2xl font-black">
-                          Czekamy na start rundy
-                        </h3>
-                        <p className="mt-2 max-w-xl text-sm leading-6 text-[#59645d]">
-                          Host moze jeszcze zmienic kategorie i czas. Po
-                          starcie zostanie wylosowana litera.
-                        </p>
-                      </div>
-                    </div>
-                  ) : null}
-
-                  {room.status === "playing" ? (
-                    <div className="flex flex-col gap-5">
-                      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#e1e6dc] pb-4">
-                        <div className="flex items-center gap-3">
-                          <div className="grid h-16 w-16 place-items-center rounded-[8px] bg-[#d55138] text-4xl font-black text-white">
-                            {room.letter}
-                          </div>
-                          <div>
-                            <h3 className="text-2xl font-black">
-                              Runda {room.currentRound}
-                            </h3>
-                            <p className="text-sm font-bold text-[#59645d]">
-                              Wpisz odpowiedzi i kliknij gotowe.
-                            </p>
-                          </div>
-                        </div>
-                        <div className="inline-flex h-12 items-center gap-2 rounded-[8px] border border-[#cbd3c3] px-4 text-xl font-black">
-                          <Timer size={20} /> {formatTime(timeLeft)}
-                        </div>
-                      </div>
-
-                      <div className="grid gap-3 md:grid-cols-2">
-                        {room.categories.map((category) => (
-                          <label
-                            key={category.id}
-                            className="block rounded-[8px] border border-[#e1e6dc] bg-[#fbfcf8] p-3"
-                          >
-                            <span className="text-sm font-black text-[#344138]">
-                              {category.name}
-                            </span>
-                            <input
-                              value={myAnswers[category.id] || ""}
-                              disabled={isLocked}
-                              onChange={(event) =>
-                                setMyAnswers((current) => ({
-                                  ...current,
-                                  [category.id]: event.target.value,
-                                }))
-                              }
-                              className="mt-2 h-11 w-full rounded-[8px] border border-[#cbd3c3] bg-white px-3 outline-none focus:border-[#2f6249] disabled:bg-[#edf0e8]"
-                              placeholder={`${category.name} na ${room.letter}`}
-                            />
-                          </label>
-                        ))}
-                      </div>
-
-                      <button
-                        type="button"
-                        onClick={() => void lockAnswers()}
-                        disabled={isBusy || isLocked}
-                        className="inline-flex h-12 w-full items-center justify-center gap-2 rounded-[8px] bg-[#d55138] px-5 text-sm font-black text-white hover:bg-[#bc422c] disabled:cursor-not-allowed disabled:opacity-50"
-                      >
-                        {isBusy ? <Loader2 className="animate-spin" size={18} /> : <Check size={18} />}
-                        {isLocked ? "Gotowe wyslane" : "Gotowe"}
-                      </button>
-                    </div>
-                  ) : null}
-
-                  {room.status === "review" ? (
-                    <div className="flex flex-col gap-4">
-                      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#e1e6dc] pb-4">
-                        <div>
-                          <h3 className="flex items-center gap-2 text-2xl font-black">
-                            <Eye size={24} /> Odpowiedzi
-                          </h3>
-                          <p className="mt-1 text-sm font-bold text-[#59645d]">
-                            Litera rundy: {room.letter}
-                          </p>
-                        </div>
-                        <div className="rounded-[8px] bg-[#eaf3ec] px-4 py-2 text-sm font-black text-[#2f6249]">
-                          {room.scoredRound === room.currentRound
-                            ? "Punkty zapisane"
-                            : "Punkty rundy widoczne ponizej"}
-                        </div>
-                      </div>
-
-                      <div className="overflow-x-auto">
-                        <table className="w-full min-w-[720px] border-collapse text-sm">
-                          <thead>
-                            <tr className="border-b border-[#dfe5da] text-left">
-                              <th className="py-3 pr-3 font-black">Gracz</th>
-                              {room.categories.map((category) => (
-                                <th key={category.id} className="px-3 py-3 font-black">
-                                  {category.name}
-                                </th>
-                              ))}
-                              <th className="py-3 pl-3 text-right font-black">
-                                Punkty
-                              </th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {players.map((player) => {
-                              const answerDoc = roundAnswers[player.id];
-                              return (
-                                <tr key={player.id} className="border-b border-[#eef1ea] align-top">
-                                  <td className="py-3 pr-3">
-                                    <div className="font-black">{player.name}</div>
-                                    <div className="text-xs text-[#6b756d]">
-                                      {player.intbaId}
-                                    </div>
-                                  </td>
-                                  {room.categories.map((category) => {
-                                    const answer = answerDoc?.answers?.[category.id];
-                                    return (
-                                      <td key={category.id} className="px-3 py-3">
-                                        <div className="font-bold">
-                                          {answer?.answer || "-"}
-                                        </div>
-                                        <div
-                                          className={`mt-1 inline-flex rounded-full px-2 py-0.5 text-xs font-black ${
-                                            answer?.valid
-                                              ? "bg-[#e7f3e6] text-[#2f6249]"
-                                              : "bg-[#ffe8e1] text-[#a33c28]"
-                                          }`}
-                                        >
-                                          {answer?.valid ? "OK" : "0 pkt"}
-                                        </div>
-                                        <p className="mt-1 max-w-44 text-xs leading-5 text-[#667169]">
-                                          {answer?.reason || "Brak odpowiedzi."}
-                                        </p>
-                                        {isHost && answerDoc ? (
-                                          <div className="mt-2 flex gap-1">
-                                            <button
-                                              type="button"
-                                              onClick={() =>
-                                                void toggleAnswer(
-                                                  answerDoc,
-                                                  category.id,
-                                                  true,
-                                                )
-                                              }
-                                              title="Uznaj odpowiedz"
-                                              className="grid h-7 w-7 place-items-center rounded-[6px] border border-[#b7ceb9] text-[#2f6249] hover:bg-[#e7f3e6]"
-                                            >
-                                              <Check size={14} />
-                                            </button>
-                                            <button
-                                              type="button"
-                                              onClick={() =>
-                                                void toggleAnswer(
-                                                  answerDoc,
-                                                  category.id,
-                                                  false,
-                                                )
-                                              }
-                                              title="Odrzuc odpowiedz"
-                                              className="grid h-7 w-7 place-items-center rounded-[6px] border border-[#e0b6ad] text-[#a33c28] hover:bg-[#ffe8e1]"
-                                            >
-                                              <X size={14} />
-                                            </button>
-                                          </div>
-                                        ) : null}
-                                      </td>
-                                    );
-                                  })}
-                                  <td className="py-3 pl-3 text-right text-lg font-black">
-                                    {roundTotals[player.id] || 0}
-                                  </td>
-                                </tr>
-                              );
-                            })}
-                          </tbody>
-                        </table>
-                      </div>
-                    </div>
-                  ) : null}
-                </section>
-
-                <aside className="rounded-[8px] border border-[#d4d8c8] bg-white p-4 shadow-sm">
-                  <h3 className="mb-4 flex items-center gap-2 text-lg font-black">
-                    <ShieldCheck size={20} /> Gracze
-                  </h3>
-                  <div className="flex flex-col gap-3">
-                    {players.map((player) => (
-                      <div
-                        key={player.id}
-                        className="flex items-center gap-3 rounded-[8px] border border-[#edf0e8] bg-[#fbfcf8] p-3"
-                      >
-                        <div className="grid h-10 w-10 shrink-0 place-items-center overflow-hidden rounded-full bg-[#e8efe4] text-sm font-black text-[#385845]">
-                          {player.avatarUrl ? (
-                            <img
-                              src={player.avatarUrl}
-                              alt=""
-                              className="h-full w-full object-cover"
-                            />
-                          ) : (
-                            getInitials(player.name)
-                          )}
-                        </div>
-                        <div className="min-w-0 flex-1">
-                          <div className="flex min-w-0 items-center gap-1">
-                            <span className="truncate font-black">
-                              {player.name}
-                            </span>
-                            {player.isHost ? (
-                              <Crown size={15} className="text-[#c89421]" />
-                            ) : null}
-                          </div>
-                          <div className="text-xs text-[#6b756d]">
-                            {player.score || 0} pkt lacznie
-                          </div>
-                        </div>
-                        <span
-                          className={`rounded-full px-2 py-1 text-xs font-black ${
-                            player.ready
-                              ? "bg-[#e7f3e6] text-[#2f6249]"
-                              : "bg-[#eef1ea] text-[#6b756d]"
-                          }`}
-                        >
-                          {player.ready ? "Gotowy" : "Czeka"}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                </aside>
-              </div>
-            </section>
-          )}
-
-          <section className="rounded-[8px] border border-[#d4d8c8] bg-white p-4 shadow-sm">
-            <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
-              <div className="font-bold text-[#536057]">
-                {status || "Gotowe do gry."}
-              </div>
-              <div className="flex items-center gap-2 text-xs font-bold text-[#6b756d]">
-                <Activity size={16} />
-                Firestore: {GAME_COLLECTION}
+                <a className="secondary-action" href="#lobby">
+                  <Users /> Dolacz kodem
+                </a>
               </div>
             </div>
+            <aside className="hero-console" aria-label="Podglad statusu">
+              <div className="console-header">
+                <span />
+                <span />
+                <span />
+              </div>
+              <div className="console-line">
+                <span className="muted">$ intba game status</span>
+                <strong>{room ? statusText(room.status) : "ready"}</strong>
+              </div>
+              <div className="console-card">
+                <Bot />
+                <div>
+                  <span>INTBA ID</span>
+                  <p>{profile.name} / {profile.intbaId}</p>
+                </div>
+              </div>
+              <div className="console-card">
+                <BrainCircuit />
+                <div>
+                  <span>AI validation</span>
+                  <p>{room?.allowAiValidation ? "Aktywne" : "Opcjonalne"}</p>
+                </div>
+              </div>
+            </aside>
           </section>
-        </div>
-      </section>
+
+          <section className="game-workspace" id="lobby">
+            <aside className="side-stack">
+              <section className="panel-card">
+                <div className="panel-head">
+                  <div>
+                    <p className="eyebrow">Konto</p>
+                    <h2>Profil INTBA</h2>
+                  </div>
+                  <BadgeCheck />
+                </div>
+                <div className="profile-row">
+                  <div className="avatar-preview">
+                    {profile.avatarUrl ? (
+                      <img src={profile.avatarUrl} alt="" />
+                    ) : (
+                      getInitials(profile.name || "INTBA")
+                    )}
+                  </div>
+                  <label className="secondary-action avatar-upload">
+                    {avatarBusy ? <Loader2 className="spin-icon" /> : <Upload />}
+                    Avatar
+                    <input
+                      type="file"
+                      accept="image/png,image/jpeg,image/webp"
+                      onChange={(event) =>
+                        uploadAvatar(event.target.files?.[0] || null)
+                      }
+                    />
+                  </label>
+                </div>
+                <label htmlFor="profileNick">Nick</label>
+                <input
+                  id="profileNick"
+                  value={profile.name}
+                  onChange={(event) =>
+                    setProfile((current) => ({
+                      ...current,
+                      name: event.target.value,
+                    }))
+                  }
+                  placeholder="Nick w grze"
+                />
+                <button
+                  className="secondary-action wide-action"
+                  type="button"
+                  onClick={() => void saveProfile()}
+                >
+                  <Check /> Zapisz profil
+                </button>
+              </section>
+
+              <section className="panel-card" id="ustawienia">
+                <div className="panel-head">
+                  <div>
+                    <p className="eyebrow">Host</p>
+                    <h2>Ustawienia</h2>
+                  </div>
+                  <Settings2 />
+                </div>
+                <label htmlFor="roomName">Nazwa lobby</label>
+                <input
+                  id="roomName"
+                  value={settings.name}
+                  onChange={(event) => {
+                    setSettings((current) => ({
+                      ...current,
+                      name: event.target.value,
+                    }));
+                    setSettingsDirty(true);
+                  }}
+                />
+                <div className="form-grid-2">
+                  <label htmlFor="maxPlayers">
+                    Gracze
+                    <input
+                      id="maxPlayers"
+                      type="number"
+                      min={2}
+                      max={12}
+                      value={settings.maxPlayers}
+                      onChange={(event) => {
+                        setSettings((current) => ({
+                          ...current,
+                          maxPlayers: clampPlayers(Number(event.target.value)),
+                        }));
+                        setSettingsDirty(true);
+                      }}
+                    />
+                  </label>
+                  <label htmlFor="answerTime">
+                    Czas
+                    <input
+                      id="answerTime"
+                      type="number"
+                      min={20}
+                      max={300}
+                      value={settings.answerTimeSec}
+                      onChange={(event) => {
+                        setSettings((current) => ({
+                          ...current,
+                          answerTimeSec: clampAnswerTime(
+                            Number(event.target.value),
+                          ),
+                        }));
+                        setSettingsDirty(true);
+                      }}
+                    />
+                  </label>
+                </div>
+                <label className="toggle-row">
+                  <input
+                    type="checkbox"
+                    checked={settings.allowAiValidation}
+                    onChange={(event) => {
+                      setSettings((current) => ({
+                        ...current,
+                        allowAiValidation: event.target.checked,
+                      }));
+                      setSettingsDirty(true);
+                    }}
+                  />
+                  <span>Sprawdzanie odpowiedzi przez AI</span>
+                </label>
+                {room && isHost && room.status === "lobby" ? (
+                  <button
+                    className="secondary-action wide-action"
+                    type="button"
+                    onClick={() => void saveRoomSettings()}
+                  >
+                    <Check /> Zapisz ustawienia lobby
+                  </button>
+                ) : null}
+              </section>
+
+              <section className="panel-card">
+                <div className="panel-head">
+                  <div>
+                    <p className="eyebrow">Kategorie</p>
+                    <h2>Tablica</h2>
+                  </div>
+                  <Wand2 />
+                </div>
+                <div className="category-list">
+                  {settings.categories.map((category) => (
+                    <span className="category-pill" key={category.id}>
+                      {category.name}
+                      <button
+                        type="button"
+                        onClick={() => removeCategory(category.id)}
+                        disabled={category.locked}
+                        title="Usun kategorie"
+                      >
+                        <X />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+                <div className="inline-form">
+                  <input
+                    value={newCategory}
+                    onChange={(event) => setNewCategory(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        addCategory();
+                      }
+                    }}
+                    placeholder="np. Film, marka, sport"
+                  />
+                  <button
+                    className="icon-button"
+                    type="button"
+                    onClick={addCategory}
+                    aria-label="Dodaj kategorie"
+                  >
+                    <Plus />
+                  </button>
+                </div>
+              </section>
+            </aside>
+
+            <div className="main-stack">
+              {!firebaseReady ? (
+                <section className="system-alert">
+                  <strong>Firebase nie jest podpiety.</strong> Lobby i INTBA ID
+                  wymagaja configu Firebase w env.
+                </section>
+              ) : null}
+
+              {!room ? (
+                <section className="lobby-grid">
+                  <article className="panel-card action-card">
+                    <Users />
+                    <h2>Stworz lobby</h2>
+                    <p>
+                      Kod pokoju, host, limit do 12 osob, kategorie i timer
+                      zapisuja sie realtime w Firestore.
+                    </p>
+                    <button
+                      className="primary-action wide-action"
+                      type="button"
+                      onClick={() => void createLobby()}
+                      disabled={isBusy || !firebaseReady}
+                    >
+                      {isBusy ? <Loader2 className="spin-icon" /> : <Play />}
+                      Utworz pokoj
+                    </button>
+                  </article>
+
+                  <article className="panel-card action-card">
+                    <LogIn />
+                    <h2>Dolacz</h2>
+                    <p>
+                      Wpisz kod od hosta. Twoj profil, avatar i staty ida z
+                      INTBA ID.
+                    </p>
+                    <div className="join-row">
+                      <input
+                        value={joinCode}
+                        onChange={(event) =>
+                          setJoinCode(event.target.value.toUpperCase())
+                        }
+                        placeholder="KOD"
+                        maxLength={6}
+                      />
+                      <button
+                        className="primary-action"
+                        type="button"
+                        onClick={() => void joinLobby()}
+                        disabled={isBusy || !firebaseReady}
+                      >
+                        <LogIn /> Wejdz
+                      </button>
+                    </div>
+                  </article>
+                </section>
+              ) : (
+                <section className="room-stack">
+                  <div className="room-header panel-card">
+                    <div>
+                      <div className="room-meta">
+                        <span>{statusText(room.status)}</span>
+                        <span>{players.length}/{room.maxPlayers} graczy</span>
+                        <span>{room.answerTimeSec}s</span>
+                      </div>
+                      <h2>{room.name}</h2>
+                    </div>
+                    <div className="room-actions">
+                      <button
+                        className="secondary-action"
+                        type="button"
+                        onClick={copyCode}
+                      >
+                        <Copy /> {room.code}
+                      </button>
+                      <button
+                        className="secondary-action danger-action"
+                        type="button"
+                        onClick={() => void leaveRoom()}
+                      >
+                        <Trash2 /> Wyjdz
+                      </button>
+                      {isHost ? (
+                        <button
+                          className="primary-action"
+                          type="button"
+                          onClick={() => void startRound()}
+                          disabled={isBusy || players.length === 0}
+                        >
+                          {room.status === "review" ? <Dice5 /> : <Play />}
+                          {room.status === "review" ? "Nastepna" : "Start"}
+                        </button>
+                      ) : null}
+                    </div>
+                  </div>
+
+                  <div className="game-grid">
+                    <section className="panel-card game-board">
+                      {room.status === "lobby" ? (
+                        <div className="empty-state">
+                          <Dice5 />
+                          <h2>Czekamy na start rundy</h2>
+                          <p>
+                            Host moze zmienic czas i kategorie. Po starcie
+                            losujemy litere i blokujemy ustawienia rundy.
+                          </p>
+                        </div>
+                      ) : null}
+
+                      {room.status === "playing" ? (
+                        <div className="answers-panel">
+                          <div className="round-head">
+                            <div className="round-letter">{room.letter}</div>
+                            <div>
+                              <p className="eyebrow">Runda {room.currentRound}</p>
+                              <h2>Wpisz odpowiedzi</h2>
+                            </div>
+                            <div className="timer-badge">
+                              <Timer /> {formatTime(timeLeft)}
+                            </div>
+                          </div>
+                          <div className="answer-grid">
+                            {room.categories.map((category) => (
+                              <label key={category.id} className="answer-field">
+                                {category.name}
+                                <input
+                                  value={myAnswers[category.id] || ""}
+                                  disabled={isLocked}
+                                  onChange={(event) =>
+                                    setMyAnswers((current) => ({
+                                      ...current,
+                                      [category.id]: event.target.value,
+                                    }))
+                                  }
+                                  placeholder={`${category.name} na ${room.letter}`}
+                                />
+                              </label>
+                            ))}
+                          </div>
+                          <button
+                            className="primary-action wide-action"
+                            type="button"
+                            onClick={() => void lockAnswers()}
+                            disabled={isBusy || isLocked}
+                          >
+                            {isBusy ? (
+                              <Loader2 className="spin-icon" />
+                            ) : (
+                              <Check />
+                            )}
+                            {isLocked ? "Gotowe wyslane" : "Gotowe"}
+                          </button>
+                        </div>
+                      ) : null}
+
+                      {room.status === "review" ? (
+                        <div className="review-panel">
+                          <div className="round-head">
+                            <div>
+                              <p className="eyebrow">Litera {room.letter}</p>
+                              <h2><Eye /> Odpowiedzi</h2>
+                            </div>
+                            <span className="score-chip">
+                              {room.scoredRound === room.currentRound
+                                ? "Punkty zapisane"
+                                : "Do zatwierdzenia w nastepnej rundzie"}
+                            </span>
+                          </div>
+                          <div className="table-scroll">
+                            <table>
+                              <thead>
+                                <tr>
+                                  <th>Gracz</th>
+                                  {room.categories.map((category) => (
+                                    <th key={category.id}>{category.name}</th>
+                                  ))}
+                                  <th>Pkt</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {players.map((player) => {
+                                  const answerDoc = roundAnswers[player.id];
+                                  return (
+                                    <tr key={player.id}>
+                                      <td>
+                                        <strong>{player.name}</strong>
+                                        <small>{player.intbaId}</small>
+                                      </td>
+                                      {room.categories.map((category) => {
+                                        const answer =
+                                          answerDoc?.answers?.[category.id];
+                                        return (
+                                          <td key={category.id}>
+                                            <strong>{answer?.answer || "-"}</strong>
+                                            <span
+                                              className={
+                                                answer?.valid
+                                                  ? "valid-chip"
+                                                  : "invalid-chip"
+                                              }
+                                            >
+                                              {answer?.valid ? "OK" : "0 pkt"}
+                                            </span>
+                                            <small>
+                                              {answer?.reason ||
+                                                "Brak odpowiedzi."}
+                                            </small>
+                                            {isHost && answerDoc ? (
+                                              <div className="mini-actions">
+                                                <button
+                                                  type="button"
+                                                  onClick={() =>
+                                                    void toggleAnswer(
+                                                      answerDoc,
+                                                      category.id,
+                                                      true,
+                                                    )
+                                                  }
+                                                  title="Uznaj odpowiedz"
+                                                >
+                                                  <Check />
+                                                </button>
+                                                <button
+                                                  type="button"
+                                                  onClick={() =>
+                                                    void toggleAnswer(
+                                                      answerDoc,
+                                                      category.id,
+                                                      false,
+                                                    )
+                                                  }
+                                                  title="Odrzuc odpowiedz"
+                                                >
+                                                  <X />
+                                                </button>
+                                              </div>
+                                            ) : null}
+                                          </td>
+                                        );
+                                      })}
+                                      <td className="points-cell">
+                                        {roundTotals[player.id] || 0}
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      ) : null}
+                    </section>
+
+                    <aside className="panel-card players-panel" id="ranking">
+                      <div className="panel-head">
+                        <div>
+                          <p className="eyebrow">Ranking</p>
+                          <h2>Gracze</h2>
+                        </div>
+                        <ShieldCheck />
+                      </div>
+                      <div className="players-list">
+                        {players.map((player) => (
+                          <div className="player-row" key={player.id}>
+                            <div className="player-avatar">
+                              {player.avatarUrl ? (
+                                <img src={player.avatarUrl} alt="" />
+                              ) : (
+                                getInitials(player.name)
+                              )}
+                            </div>
+                            <div>
+                              <strong>
+                                {player.name}
+                                {player.isHost ? <Crown /> : null}
+                              </strong>
+                              <span>{player.score || 0} pkt lacznie</span>
+                            </div>
+                            <em className={player.ready ? "ready" : ""}>
+                              {player.ready ? "Gotowy" : "Czeka"}
+                            </em>
+                          </div>
+                        ))}
+                      </div>
+                    </aside>
+                  </div>
+                </section>
+              )}
+
+              <section className="status-bar">
+                <div>
+                  <Activity />
+                  {status || "Gotowe do gry."}
+                </div>
+                <div>
+                  <ImageIcon />
+                  {GAME_COLLECTION}/uzytkownicy/lista/{playerId || "id"}
+                </div>
+              </section>
+            </div>
+          </section>
+        </>
+      )}
     </main>
   );
 }
