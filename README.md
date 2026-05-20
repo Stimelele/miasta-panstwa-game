@@ -1,36 +1,80 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Panstwa Miasta Gra
 
-## Getting Started
+Online wersja gry Panstwa Miasta z lobby do 12 osob, kategoriami, timerem,
+losowaniem litery, przyciskiem gotowosci i odslanianiem odpowiedzi po komplecie
+graczy albo po czasie.
 
-First, run the development server:
+## Stack
+
+- Next.js App Router pod Vercel
+- Firebase Auth anonymous + Firestore realtime
+- OpenAI Responses API przez server route `/api/validate-answer`
+- GitHub Contents API przez server route `/api/avatar`
+
+## Start lokalnie
 
 ```bash
+npm install
+cp .env.example .env.local
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Strona lokalnie: http://localhost:3000
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Firebase
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+W `.env.local` wklej config z Firebase Web App:
 
-## Learn More
+```bash
+NEXT_PUBLIC_FIREBASE_API_KEY=
+NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=
+NEXT_PUBLIC_FIREBASE_PROJECT_ID=
+NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=
+NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=
+NEXT_PUBLIC_FIREBASE_APP_ID=
+NEXT_PUBLIC_FIREBASE_COLLECTION_ROOT=Panstwa Miasta Gra
+```
 
-To learn more about Next.js, take a look at the following resources:
+Aplikacja zapisuje dane pod root collection `Panstwa Miasta Gra`:
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+- `rejestr/uzytkownicy/{intbaId}` - profile graczy
+- `lobby/pokoje/{kod}` - ustawienia lobby i status rundy
+- `lobby/pokoje/{kod}/gracze/{intbaId}` - gracze, gotowosc i punkty
+- `lobby/pokoje/{kod}/rundy/{nr}/odpowiedzi/{intbaId}` - odpowiedzi rund
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+W Firebase wlacz Anonymous Auth i opublikuj `firestore.rules`.
 
-## Deploy on Vercel
+## AI sprawdzanie odpowiedzi
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+Dodaj server-only env:
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+```bash
+AI_API_KEY=
+AI_MODEL=gpt-5-mini
+```
+
+Mozesz tez uzyc `OPENAI_API_KEY` zamiast `AI_API_KEY`. Bez tokenu system nadal
+sprawdza podstawowa zasade: odpowiedz musi zaczynac sie od wylosowanej litery.
+
+## Avatar upload do GitHuba
+
+Runtime upload do repo wymaga tokenu po stronie serwera:
+
+```bash
+GITHUB_TOKEN=
+GITHUB_OWNER=
+GITHUB_REPO=
+GITHUB_BRANCH=main
+```
+
+Endpoint zapisuje pliki do `public/avatars/` przez GitHub Contents API i zwraca
+raw.githubusercontent.com URL.
+
+## Deploy na Vercel
+
+1. Wypchnij repo na GitHub.
+2. Zaimportuj repo w Vercel jako Next.js.
+3. Dodaj zmienne srodowiskowe z `.env.example`.
+4. Deploy.
+
+Tokeny `AI_API_KEY` i `GITHUB_TOKEN` ustawiaj tylko jako server-side env w Vercel.
