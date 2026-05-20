@@ -104,7 +104,10 @@ async function validateWithGroq(
   );
 
   if (!response.ok) {
-    throw new Error("Groq validation failed.");
+    const errorText = await response.text();
+    throw new Error(
+      `Groq validation failed: ${response.status} ${errorText.slice(0, 300)}`,
+    );
   }
 
   const payload = (await response.json()) as {
@@ -159,7 +162,10 @@ async function validateWithOpenAi(
   });
 
   if (!response.ok) {
-    throw new Error("OpenAI validation failed.");
+    const errorText = await response.text();
+    throw new Error(
+      `OpenAI validation failed: ${response.status} ${errorText.slice(0, 300)}`,
+    );
   }
 
   const payload = await response.json();
@@ -187,7 +193,11 @@ export async function POST(request: Request) {
         : await validateWithOpenAi(token, category, letter, answer);
 
     return NextResponse.json(result);
-  } catch {
+  } catch (error) {
+    console.warn(
+      "AI validation fallback:",
+      error instanceof Error ? error.message : "unknown error",
+    );
     return NextResponse.json(fallback);
   }
 }
