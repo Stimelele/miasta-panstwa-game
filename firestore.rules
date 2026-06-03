@@ -3,7 +3,10 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     match /{root}/{document=**} {
-      allow read, write: if root == "Panstwa Miasta Gra" && request.auth != null;
+      allow read, write: if (
+        root == "Panstwa Miasta Gra" ||
+        root == "Uzytkownicy"
+      ) && request.auth != null;
     }
   }
 }

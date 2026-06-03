@@ -84,6 +84,9 @@ import { ruleValidateAnswer } from "@/lib/validation";
 
 const PROFILE_STORAGE_KEY = "panstwa-miasta-intba-session";
 const GAME_DOC_ID = "panstwa-miasta";
+const INTBA_USERS_COLLECTION = "Uzytkownicy";
+const INTBA_GAMES_COLLECTION = "Gry";
+const GAME_PROFILE_DOC_ID = "Profil w grze";
 const MAX_AVATAR_SOURCE_BYTES = 8 * 1024 * 1024;
 const AVATAR_CANVAS_SIZE = 512;
 
@@ -96,11 +99,19 @@ const initialSettings: RoomSettings = {
 };
 
 function userRef(db: Firestore, accountId: string) {
+  return doc(db, INTBA_USERS_COLLECTION, accountId);
+}
+
+function legacyUserRef(db: Firestore, accountId: string) {
   return doc(db, GAME_COLLECTION, "uzytkownicy", "lista", accountId);
 }
 
 function userGameRef(db: Firestore, accountId: string) {
-  return doc(userRef(db, accountId), "gra", GAME_DOC_ID);
+  return doc(
+    userRef(db, accountId),
+    INTBA_GAMES_COLLECTION,
+    GAME_PROFILE_DOC_ID,
+  );
 }
 
 function intbaProfileRef(db: Firestore, intbaId: string) {
@@ -115,6 +126,29 @@ function intbaProfileRef(db: Firestore, intbaId: string) {
 
 function roomRef(db: Firestore, code: string) {
   return doc(db, GAME_COLLECTION, "lobby", "pokoje", code.toUpperCase());
+}
+
+async function loadUserGameProfile(db: Firestore, accountId: string) {
+  const gameSnapshot = await getDoc(userGameRef(db, accountId));
+  if (gameSnapshot.exists()) {
+    const accountSnapshot = await getDoc(userRef(db, accountId));
+    return {
+      ...(accountSnapshot.exists() ? accountSnapshot.data() : {}),
+      ...gameSnapshot.data(),
+    } as PlayerProfile;
+  }
+
+  const accountSnapshot = await getDoc(userRef(db, accountId));
+  if (accountSnapshot.exists()) {
+    return accountSnapshot.data() as PlayerProfile;
+  }
+
+  const legacySnapshot = await getDoc(legacyUserRef(db, accountId));
+  if (legacySnapshot.exists()) {
+    return legacySnapshot.data() as PlayerProfile;
+  }
+
+  return null;
 }
 
 function playersRef(db: Firestore, code: string) {
@@ -414,10 +448,7 @@ export function GameShell() {
         return;
       }
 
-      const snapshot = await getDoc(userRef(db, user.uid));
-      const savedUser = snapshot.exists()
-        ? (snapshot.data() as PlayerProfile)
-        : null;
+      const savedUser = await loadUserGameProfile(db, user.uid);
       const currentProfile = profileRef.current;
       const nextProfile: PlayerProfile = {
         uid: user.uid,
@@ -628,8 +659,12 @@ export function GameShell() {
       };
 
       await setDoc(userRef(db, accountUser.uid), {
-        ...accountProfile,
         id: accountUser.uid,
+        uid: accountUser.uid,
+        email: accountProfile.email,
+        intbaId: accountProfile.intbaId,
+        name: accountProfile.name,
+        avatarUrl: accountProfile.avatarUrl || "",
         playerId: intbaId,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
@@ -643,7 +678,13 @@ export function GameShell() {
       await setDoc(
         userGameRef(db, accountUser.uid),
         {
+          ...accountProfile,
+          id: accountUser.uid,
+          uid: accountUser.uid,
+          playerId: intbaId,
           gameId: GAME_DOC_ID,
+          gameName: "Panstwa Miasta",
+          profileDoc: GAME_PROFILE_DOC_ID,
           stats: {
             totalScore: 0,
             roundsPlayed: 0,
@@ -685,15 +726,14 @@ export function GameShell() {
     try {
       const { auth, db } = getFirebaseClient();
       const credential = await signInWithEmailAndPassword(auth, email, password);
-      const snapshot = await getDoc(userRef(db, credential.user.uid));
+      const savedUser = await loadUserGameProfile(db, credential.user.uid);
 
-      if (!snapshot.exists()) {
+      if (!savedUser) {
         setStatus("Konto istnieje w Auth, ale nie ma profilu gry. Zarejestruj profil.");
         setAuthMode("register");
         return;
       }
 
-      const savedUser = snapshot.data() as PlayerProfile;
       const nextProfile = {
         uid: credential.user.uid,
         email: credential.user.email,
@@ -705,10 +745,28 @@ export function GameShell() {
       await setDoc(
         userGameRef(db, credential.user.uid),
         {
+          ...nextProfile,
           gameId: GAME_DOC_ID,
+          gameName: "Panstwa Miasta",
+          profileDoc: GAME_PROFILE_DOC_ID,
+          playerId: createPlayerId(nextProfile.intbaId || email),
           stats: {
             loginCount: increment(1),
           },
+          lastLoginAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true },
+      );
+      await setDoc(
+        userRef(db, credential.user.uid),
+        {
+          uid: credential.user.uid,
+          email: credential.user.email,
+          intbaId: nextProfile.intbaId,
+          name: nextProfile.name,
+          avatarUrl: nextProfile.avatarUrl || "",
+          playerId: createPlayerId(nextProfile.intbaId || email),
           lastLoginAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
         },
@@ -758,8 +816,12 @@ export function GameShell() {
       await setDoc(
         userRef(db, trimmedProfile.uid),
         {
-          ...trimmedProfile,
           id: trimmedProfile.uid,
+          uid: trimmedProfile.uid,
+          email: trimmedProfile.email || "",
+          intbaId: trimmedProfile.intbaId,
+          name: trimmedProfile.name,
+          avatarUrl: trimmedProfile.avatarUrl || "",
           playerId: playerSlug,
           updatedAt: serverTimestamp(),
         },
@@ -778,7 +840,13 @@ export function GameShell() {
       await setDoc(
         userGameRef(db, trimmedProfile.uid),
         {
+          ...trimmedProfile,
+          id: trimmedProfile.uid,
+          uid: trimmedProfile.uid,
+          playerId: playerSlug,
           gameId: GAME_DOC_ID,
+          gameName: "Panstwa Miasta",
+          profileDoc: GAME_PROFILE_DOC_ID,
           lastProfileUpdateAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
         },
@@ -1366,6 +1434,13 @@ export function GameShell() {
         await setDoc(
           userGameRef(db, nextProfile.uid || accountId),
           {
+            ...nextProfile,
+            id: nextProfile.uid || accountId,
+            uid: nextProfile.uid || accountId,
+            playerId: activePlayerId,
+            gameId: GAME_DOC_ID,
+            gameName: "Panstwa Miasta",
+            profileDoc: GAME_PROFILE_DOC_ID,
             avatarUpdatedAt: serverTimestamp(),
             updatedAt: serverTimestamp(),
           },
@@ -1582,9 +1657,9 @@ export function GameShell() {
               {authMode === "login" ? "Zaloguj email + haslo" : "Utworz konto"}
             </button>
 
-            <pre className="json-hint">{`${GAME_COLLECTION}/uzytkownicy/lista/{UID}
+            <pre className="json-hint">{`${INTBA_USERS_COLLECTION}/{UID}
+  ${INTBA_GAMES_COLLECTION}/${GAME_PROFILE_DOC_ID}
   intbaId
-  gra/${GAME_DOC_ID}
   stats.totalScore
   stats.roundsPlayed`}</pre>
             <p className="status-message">{status || "Czekam na email i haslo."}</p>
@@ -2167,7 +2242,8 @@ export function GameShell() {
                 </div>
                 <div>
                   <ImageIcon />
-                  {GAME_COLLECTION}/uzytkownicy/lista/{playerId || "id"}
+                  {INTBA_USERS_COLLECTION}/{accountId || "UID"}/
+                  {INTBA_GAMES_COLLECTION}/{GAME_PROFILE_DOC_ID}
                 </div>
               </section>
             </div>
