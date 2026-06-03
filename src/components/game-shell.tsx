@@ -7,15 +7,19 @@ import {
   BadgeCheck,
   Bot,
   BrainCircuit,
+  Camera,
   Check,
   Copy,
   Crown,
   Dice5,
   Eye,
+  FileImage,
+  IdCard,
   Image as ImageIcon,
   Loader2,
   LogIn,
   LogOut,
+  Mail,
   Plus,
   Play,
   Settings2,
@@ -80,6 +84,8 @@ import { ruleValidateAnswer } from "@/lib/validation";
 
 const PROFILE_STORAGE_KEY = "panstwa-miasta-intba-session";
 const GAME_DOC_ID = "panstwa-miasta";
+const MAX_AVATAR_SOURCE_BYTES = 8 * 1024 * 1024;
+const AVATAR_CANVAS_SIZE = 512;
 
 const initialSettings: RoomSettings = {
   name: "INTBA Panstwa Miasta",
@@ -165,6 +171,91 @@ function getInitials(name: string) {
   );
 }
 
+function formatFileSize(bytes: number) {
+  if (bytes < 1024 * 1024) {
+    return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  }
+
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function readImage(file: File) {
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const image = new Image();
+
+    image.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve(image);
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("Nie udalo sie odczytac obrazu."));
+    };
+    image.src = url;
+  });
+}
+
+async function canvasToBlob(
+  canvas: HTMLCanvasElement,
+  type: string,
+  quality: number,
+) {
+  return new Promise<Blob | null>((resolve) => {
+    canvas.toBlob((blob) => resolve(blob), type, quality);
+  });
+}
+
+async function prepareAvatarFile(file: File) {
+  if (!["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
+    throw new Error("Avatar musi byc plikiem JPG, PNG albo WEBP.");
+  }
+
+  if (file.size > MAX_AVATAR_SOURCE_BYTES) {
+    throw new Error("Wybierz obraz do 8 MB. Duze zdjecia spowalniaja gre.");
+  }
+
+  const image = await readImage(file);
+  const canvas = document.createElement("canvas");
+  canvas.width = AVATAR_CANVAS_SIZE;
+  canvas.height = AVATAR_CANVAS_SIZE;
+  const context = canvas.getContext("2d");
+
+  if (!context) {
+    throw new Error("Przegladarka nie pozwolila przygotowac avatara.");
+  }
+
+  const sourceSize = Math.min(image.naturalWidth, image.naturalHeight);
+  const sourceX = Math.max(0, (image.naturalWidth - sourceSize) / 2);
+  const sourceY = Math.max(0, (image.naturalHeight - sourceSize) / 2);
+
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = "high";
+  context.drawImage(
+    image,
+    sourceX,
+    sourceY,
+    sourceSize,
+    sourceSize,
+    0,
+    0,
+    AVATAR_CANVAS_SIZE,
+    AVATAR_CANVAS_SIZE,
+  );
+
+  const webpBlob = await canvasToBlob(canvas, "image/webp", 0.86);
+  const blob = webpBlob || (await canvasToBlob(canvas, "image/jpeg", 0.88));
+
+  if (!blob) {
+    throw new Error("Nie udalo sie skompresowac avatara.");
+  }
+
+  const extension = blob.type === "image/webp" ? "webp" : "jpg";
+  return new File([blob], `avatar.${extension}`, {
+    type: blob.type || "image/jpeg",
+  });
+}
+
 function statusText(status: GameRoom["status"]) {
   if (status === "playing") {
     return "Runda trwa";
@@ -228,6 +319,10 @@ export function GameShell() {
   const [status, setStatus] = useState("");
   const [isBusy, setIsBusy] = useState(false);
   const [avatarBusy, setAvatarBusy] = useState(false);
+  const [avatarPreviewUrl, setAvatarPreviewUrl] = useState("");
+  const [avatarHint, setAvatarHint] = useState(
+    "JPG, PNG albo WEBP. Przycinamy do kwadratu 512 px.",
+  );
   const [settingsDirty, setSettingsDirty] = useState(false);
   const revealRequestedRef = useRef(false);
   const profileRef = useRef(profile);
@@ -278,6 +373,14 @@ export function GameShell() {
   useEffect(() => {
     profileRef.current = profile;
   }, [profile]);
+
+  useEffect(() => {
+    return () => {
+      if (avatarPreviewUrl) {
+        URL.revokeObjectURL(avatarPreviewUrl);
+      }
+    };
+  }, [avatarPreviewUrl]);
 
   useEffect(() => {
     const saved = window.localStorage.getItem(PROFILE_STORAGE_KEY);
@@ -621,7 +724,10 @@ export function GameShell() {
     }
   }
 
-  async function saveProfile(nextProfile = profile) {
+  async function saveProfile(
+    nextProfile = profile,
+    options: { silent?: boolean } = {},
+  ) {
     const trimmedProfile = {
       ...nextProfile,
       intbaId: nextProfile.intbaId.trim(),
@@ -681,7 +787,9 @@ export function GameShell() {
     }
 
     persistProfile(trimmedProfile);
-    setStatus("Profil INTBA zapisany.");
+    if (!options.silent) {
+      setStatus("Profil INTBA zapisany.");
+    }
     return trimmedProfile;
   }
 
@@ -1176,27 +1284,73 @@ export function GameShell() {
       return;
     }
 
-    const savedProfile = await saveProfile();
-    if (!savedProfile) {
+    setAvatarBusy(true);
+    setAvatarHint("Przygotowuje obraz i przycinam go do kwadratu...");
+    setStatus("Przygotowuje avatar do wyslania.");
+
+    let preparedFile: File;
+    let previewUrl = "";
+
+    try {
+      preparedFile = await prepareAvatarFile(file);
+      previewUrl = URL.createObjectURL(preparedFile);
+      setAvatarPreviewUrl((current) => {
+        if (current) {
+          URL.revokeObjectURL(current);
+        }
+        return previewUrl;
+      });
+      setAvatarHint(
+        `Gotowy plik: ${formatFileSize(preparedFile.size)}. Wysylam do repo GitHub...`,
+      );
+    } catch (error) {
+      setAvatarBusy(false);
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Nie udalo sie przygotowac avatara.";
+      setAvatarHint(message);
+      setStatus(message);
       return;
     }
 
-    setAvatarBusy(true);
+    const savedProfile = await saveProfile(profile, { silent: true });
+    if (!savedProfile) {
+      setAvatarHint("Najpierw uzupelnij i zapisz profil INTBA.");
+      setAvatarBusy(false);
+      return;
+    }
+
     try {
+      const { auth } = getFirebaseClient();
+      const token = await auth.currentUser?.getIdToken();
+
+      if (!token) {
+        setAvatarHint("Sesja wygasla. Zaloguj sie ponownie.");
+        setStatus("Sesja wygasla. Zaloguj sie ponownie.");
+        return;
+      }
+
       const formData = new FormData();
-      formData.set("file", file);
+      formData.set("file", preparedFile);
       formData.set("intbaId", savedProfile.intbaId);
       const response = await fetch("/api/avatar", {
         method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
         body: formData,
       });
       const payload = (await response.json()) as {
         url?: string;
         error?: string;
+        size?: number;
       };
 
       if (!response.ok || !payload.url) {
-        setStatus(payload.error || "Nie udalo sie wyslac avatara.");
+        const message = payload.error || "Nie udalo sie wyslac avatara.";
+        setAvatarHint(message);
+        setStatus(message);
         return;
       }
 
@@ -1224,7 +1378,19 @@ export function GameShell() {
         }
       }
 
-      setStatus("Avatar zapisany w repo GitHub.");
+      setAvatarHint(
+        `Avatar zapisany. Rozmiar po kompresji: ${formatFileSize(
+          payload.size || preparedFile.size,
+        )}.`,
+      );
+      setStatus("Avatar zapisany w repo GitHub i ustawiony w profilu.");
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Nie udalo sie wyslac avatara.";
+      setAvatarHint(message);
+      setStatus(message);
     } finally {
       setAvatarBusy(false);
     }
@@ -1238,6 +1404,7 @@ export function GameShell() {
     setStatus("Kod lobby skopiowany.");
   }
 
+  const avatarDisplayUrl = avatarPreviewUrl || profile.avatarUrl;
   const authCopy =
     authMode === "login"
       ? "Zaloguj sie emailem i haslem. INTBA ID zostaje profilem gracza i trzyma staty gry."
@@ -1486,27 +1653,58 @@ export function GameShell() {
                   </div>
                   <BadgeCheck />
                 </div>
-                <div className="profile-row">
+                <div className="profile-hero">
                   <div className="avatar-preview">
-                    {profile.avatarUrl ? (
-                      <img src={profile.avatarUrl} alt="" />
+                    {avatarDisplayUrl ? (
+                      <img src={avatarDisplayUrl} alt="" />
                     ) : (
                       getInitials(profile.name || "INTBA")
                     )}
+                    <span className="avatar-ring" aria-hidden="true" />
                   </div>
-                  <label className="secondary-action avatar-upload">
-                    {avatarBusy ? <Loader2 className="spin-icon" /> : <Upload />}
-                    Avatar
-                    <input
-                      type="file"
-                      accept="image/png,image/jpeg,image/webp"
-                      onChange={(event) =>
-                        uploadAvatar(event.target.files?.[0] || null)
-                      }
-                    />
-                  </label>
+                  <div className="profile-identity">
+                    <strong>{profile.name || "Gracz INTBA"}</strong>
+                    <span>{profile.intbaId || "INTBA ID nieustawione"}</span>
+                    <label
+                      className={`secondary-action avatar-upload ${
+                        avatarBusy ? "is-busy" : ""
+                      }`}
+                    >
+                      {avatarBusy ? (
+                        <Loader2 className="spin-icon" />
+                      ) : (
+                        <Camera />
+                      )}
+                      {avatarBusy ? "Wysylam..." : "Zmien avatar"}
+                      <input
+                        type="file"
+                        accept="image/png,image/jpeg,image/webp"
+                        disabled={avatarBusy}
+                        onChange={(event) => {
+                          const selectedFile = event.target.files?.[0] || null;
+                          void uploadAvatar(selectedFile);
+                          event.target.value = "";
+                        }}
+                      />
+                    </label>
+                  </div>
                 </div>
-                <label htmlFor="profileNick">Nick</label>
+                <p className="avatar-hint">
+                  <FileImage /> {avatarHint}
+                </p>
+                <div className="profile-meta-grid" aria-label="Dane konta">
+                  <div>
+                    <Mail />
+                    <span>Email</span>
+                    <strong>{profile.email || authEmail || "Brak"}</strong>
+                  </div>
+                  <div>
+                    <IdCard />
+                    <span>INTBA ID</span>
+                    <strong>{profile.intbaId || "Brak"}</strong>
+                  </div>
+                </div>
+                <label htmlFor="profileNick">Nick w grze</label>
                 <input
                   id="profileNick"
                   value={profile.name}
@@ -1518,13 +1716,30 @@ export function GameShell() {
                   }
                   placeholder="Nick w grze"
                 />
-                <button
-                  className="secondary-action wide-action"
-                  type="button"
-                  onClick={() => void saveProfile()}
-                >
-                  <Check /> Zapisz profil
-                </button>
+                <div className="control-row profile-actions">
+                  <button
+                    className="secondary-action"
+                    type="button"
+                    onClick={() => void saveProfile()}
+                    disabled={avatarBusy}
+                  >
+                    <Check /> Zapisz profil
+                  </button>
+                  <label className="secondary-action avatar-upload compact-upload">
+                    {avatarBusy ? <Loader2 className="spin-icon" /> : <Upload />}
+                    Upload
+                    <input
+                      type="file"
+                      accept="image/png,image/jpeg,image/webp"
+                      disabled={avatarBusy}
+                      onChange={(event) => {
+                        const selectedFile = event.target.files?.[0] || null;
+                        void uploadAvatar(selectedFile);
+                        event.target.value = "";
+                      }}
+                    />
+                  </label>
+                </div>
               </section>
 
               <section className="panel-card" id="ustawienia">
