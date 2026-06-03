@@ -31,6 +31,7 @@ import {
 } from "lucide-react";
 import {
   createUserWithEmailAndPassword,
+  deleteUser,
   onAuthStateChanged,
   signInWithEmailAndPassword,
   signOut,
@@ -194,6 +195,9 @@ function authMessage(error: unknown) {
   }
   if (code.includes("auth/operation-not-allowed")) {
     return "Wlacz Email/Password w Firebase Authentication.";
+  }
+  if (code.includes("permission-denied")) {
+    return "Brak dostepu do Firestore. Sprawdz reguly Firebase i zaloguj sie ponownie.";
   }
 
   return error instanceof Error ? error.message : "Nie udalo sie zalogowac.";
@@ -490,25 +494,28 @@ export function GameShell() {
     try {
       const { auth, db } = getFirebaseClient();
       const intbaId = createPlayerId(trimmedProfile.intbaId);
-      const existing = await getDoc(intbaProfileRef(db, trimmedProfile.intbaId));
       const currentUser = auth.currentUser;
+      const reuseSignedInUser =
+        currentUser?.email?.toLowerCase() === trimmedProfile.email;
+      const accountUser = reuseSignedInUser
+        ? currentUser
+        : (
+            await createUserWithEmailAndPassword(
+              auth,
+              trimmedProfile.email,
+              password,
+            )
+          ).user;
 
-      if (existing.exists() && existing.data().uid !== currentUser?.uid) {
+      const existing = await getDoc(intbaProfileRef(db, trimmedProfile.intbaId));
+      if (existing.exists() && existing.data().uid !== accountUser.uid) {
+        if (!reuseSignedInUser) {
+          await deleteUser(accountUser).catch(() => undefined);
+        }
         setStatus("Ten INTBA ID juz istnieje. Uzyj logowania.");
         setAuthMode("login");
         return;
       }
-
-      const accountUser =
-        currentUser?.email?.toLowerCase() === trimmedProfile.email
-          ? currentUser
-          : (
-              await createUserWithEmailAndPassword(
-                auth,
-                trimmedProfile.email,
-                password,
-              )
-            ).user;
 
       await updateProfile(accountUser, { displayName: trimmedProfile.name });
       const accountProfile: PlayerProfile = {
